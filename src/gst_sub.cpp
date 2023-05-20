@@ -6,6 +6,9 @@
 // #include "opencv2/core/mat.hpp"
 // #include "opencv2/imgproc.hpp"
 
+namespace gstreamer_image_transport
+{
+
 void GStreamerSubscriber::internalCallback(
   const gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & msg,
   const Callback & user_cb) {
@@ -20,3 +23,5 @@ void GStreamerSubscriber::internalCallback(
 //   cv_bridge::CvImage cv_img(msg->image.header, msg->image.encoding, img_restored);
 //   user_cb(cv_img.toImageMsg());
 }
+
+};

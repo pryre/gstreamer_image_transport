@@ -1,8 +1,13 @@
 {
     "cSpell.words": [
         "Appsink",
+        "appsrc",
+        "gint",
+        "gpointer",
         "gstreamer",
         "PLUGINLIB",
-        "preroll"
+        "preroll",
+        "rawvideoparse",
+        "UYVY"
     ]
 }
