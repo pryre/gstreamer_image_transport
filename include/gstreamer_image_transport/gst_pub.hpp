@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <rclcpp/clock.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <string>
 #include <map>

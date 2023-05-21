@@ -32,7 +32,7 @@ namespace gstreamer_image_transport
 {
 
 GStreamerSubscriber::GStreamerSubscriber() :
-    _logger(rclcpp::get_logger("gst_pub")),
+    _logger(rclcpp::get_logger("gst_sub")),
     _queue_size(10),
     _force_debug_level(5),
     _gst_pipeline(nullptr),
@@ -55,22 +55,54 @@ GStreamerSubscriber::GStreamerSubscriber() :
     // _force_debug_level = node->declare_parameter(param_prefix + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
 
     //Get the last step in the encoder
+    reset();
+}
+
+GStreamerSubscriber::~GStreamerSubscriber() {
+    gst_clean_up();
+}
+
+void GStreamerSubscriber::reset() {
+    //If we have a pipeline already, clean up and start over
+    if(_gst_pipeline) {
+        RCLCPP_INFO(_logger, "Cleaning previous pipeline...");
+        gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_NULL);
+        gst_clean_up();
+    }
+
     if(!common::gst_configure(_logger, "decodebin", &_gst_pipeline, &_gst_src, &_gst_sink, _queue_size, _force_debug_level)) {
         gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
         throw std::runtime_error(msg);
     }
-}
 
-
-GStreamerSubscriber::~GStreamerSubscriber() {
-    gst_clean_up();
+    const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_PLAYING);
+    if(set_ret == GST_STATE_CHANGE_ASYNC) {
+        RCLCPP_WARN(_logger, "Waiting for system stream to ready...");
+    } else if(set_ret != GST_STATE_CHANGE_SUCCESS) {
+        const auto msg = "Could not set pipeline to playing!";
+        RCLCPP_ERROR(_logger, msg);
+        throw std::runtime_error(msg);
+    } else {
+        RCLCPP_INFO(_logger, "Started stream!");
+    }
 }
 
 void GStreamerSubscriber::internalCallback(
   const gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & msg,
   const Callback & user_cb) {
+
+    if(_last_caps != msg->caps) {
+        if(!_last_caps.empty()) {
+            RCLCPP_WARN_STREAM(_logger, "Message caps varied: " << msg->caps);
+            reset();
+        } else {
+            RCLCPP_INFO_STREAM(_logger, "Stream started: " << msg->caps);
+        }
+
+        _last_caps = msg->caps;
+    }
 
     auto caps_in = gst_caps_from_string(msg->caps.c_str());
     if(!GST_IS_CAPS(caps_in) || msg->caps.empty()) {
@@ -96,36 +128,25 @@ void GStreamerSubscriber::internalCallback(
     // gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
     // gst_segment_position_from_running_time(segment_in, GstFormat::GST_FORMAT_TIME, g_stamp);
 
-    auto info_in = gst_structure_from_string(msg->extra.c_str(), NULL);
+    auto info_in = msg->extra.empty() ? nullptr : gst_structure_from_string(msg->extra.c_str(), NULL);
 
     const auto sample_in = gst_sample_new(buffer_in, caps_in, nullptr, info_in);
     const auto push_result = gst_app_src_push_sample(_gst_src, sample_in);
+    //XXX: Sample owns buffer, no need to unref
+    gst_sample_unref(sample_in);
     if(push_result != GST_FLOW_OK) {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
         return;
     }
 
-    if(common::get_pipeline_state(_gst_pipeline) != GST_STATE_PLAYING) {
-        gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_PLAYING);
-        if(gst_element_get_state(GST_ELEMENT(_gst_pipeline), nullptr, nullptr, GST_CLOCK_TIME_NONE) != GST_STATE_CHANGE_SUCCESS) {
-            RCLCPP_ERROR(_logger, "Could not set pipeline to playing!");
-            return;
-        }
-
-        RCLCPP_INFO(_logger, "Pipeline running...");
-    }
-
-    //XXX: Sample owns buffer, no need to unref
-    gst_sample_unref(sample_in);
-
     //Pull sample back out of pipeline
-    GstSample * sample_out = gst_app_sink_pull_sample(_gst_sink);
+    GstSample * sample_out = gst_app_sink_try_pull_sample(_gst_sink, GST_SECOND);
     if (!sample_out) {
         RCLCPP_ERROR(_logger, "Could not get gstreamer sample.");
         if(gst_app_sink_is_eos(_gst_sink))
             RCLCPP_ERROR(_logger, "End-of-stream is in place!");
 
-        if(common::get_pipeline_state(_gst_pipeline, 10ms) != GST_STATE_READY)
+        if(common::get_pipeline_state(_gst_pipeline, 1s) != GST_STATE_READY)
             RCLCPP_ERROR(_logger, "Stream is not ready!");
 
         return;
@@ -155,8 +176,6 @@ void GStreamerSubscriber::gst_clean_up() {
     // RCLCPP_INFO(_logger, "Shutting down...");
 
     if(_gst_pipeline) {
-        gst_element_set_state (GST_ELEMENT(_gst_pipeline), GST_STATE_PAUSED);
-        gst_element_set_state (GST_ELEMENT(_gst_pipeline), GST_STATE_READY);
         gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_NULL);
         gst_object_unref(_gst_pipeline);
         _gst_pipeline = nullptr;

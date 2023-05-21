@@ -25,6 +25,7 @@ private:
     rclcpp::Logger _logger;
     int64_t _queue_size;
     int64_t _force_debug_level;
+    std::string _last_caps;
 
     // General gstreamer configuration
     std::string _encoder_hint;
@@ -35,6 +36,7 @@ private:
     GstAppSink *_gst_sink;
 
     void gst_clean_up();
+    void reset();
 };
 
 };

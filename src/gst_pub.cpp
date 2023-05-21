@@ -7,6 +7,7 @@
 #include <chrono>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/parameter_type.hpp>
+#include <rclcpp/duration.hpp>
 #include <rclcpp/node.hpp>
 #include <span>
 #include <stdexcept>
@@ -68,8 +69,6 @@ void GStreamerPublisher::gst_clean_up() {
     // RCLCPP_INFO(_logger, "Shutting down...");
 
     if(_gst_pipeline) {
-        gst_element_set_state (GST_ELEMENT(_gst_pipeline), GST_STATE_PAUSED);
-        gst_element_set_state (GST_ELEMENT(_gst_pipeline), GST_STATE_READY);
         gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_NULL);
         gst_object_unref(_gst_pipeline);
         _gst_pipeline = nullptr;
@@ -129,10 +128,19 @@ void GStreamerPublisher::advertiseImpl(rclcpp::Node * node, const std::string & 
         throw std::runtime_error(msg);
     }
 
+    const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_PLAYING);
+    if(set_ret == GST_STATE_CHANGE_ASYNC) {
+        RCLCPP_WARN(_logger, "Waiting for system stream to ready...");
+    } else if(set_ret != GST_STATE_CHANGE_SUCCESS) {
+        const auto msg = "Could not set pipeline to playing!";
+        RCLCPP_ERROR(_logger, msg);
+        throw std::runtime_error(msg);
+    } else {
+        RCLCPP_INFO(_logger, "Started stream!");
+    }
+
     //Do implicit advertising
     SimplePublisherPlugin::advertiseImpl(node, base_topic, custom_qos);
-
-    RCLCPP_INFO(_logger, "Started stream!");
 }
 
 GStreamerPublisher::~GStreamerPublisher() {
@@ -169,6 +177,11 @@ void GStreamerPublisher::publish(
     gst_buffer_append_memory(buffer_in, mem_in);
     const timespec ts {message.header.stamp.sec, message.header.stamp.nanosec};
     const auto g_stamp = GST_TIMESPEC_TO_TIME(ts);
+
+    //TODO: Figure out how to do this
+    // GST_BUFFER_PTS(buffer_in) = _last_pts++;
+    // GST_BUFFER_DTS(buffer_in) = _last_dts++;
+
     gst_buffer_add_reference_timestamp_meta(buffer_in, caps_in, g_stamp, GST_CLOCK_TIME_NONE);
     auto segment_in = gst_segment_new();
     gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
@@ -176,26 +189,16 @@ void GStreamerPublisher::publish(
 
     const auto sample_in = gst_sample_new(buffer_in, caps_in, segment_in, nullptr);
     const auto push_result = gst_app_src_push_sample(_gst_src, sample_in);
+    //XXX: Sample owns buffer, no need to unref
+    gst_sample_unref(sample_in);
+
     if(push_result != GST_FLOW_OK) {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
         return;
     }
 
-    if(common::get_pipeline_state(_gst_pipeline) != GST_STATE_PLAYING) {
-        gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_PLAYING);
-        if(gst_element_get_state(GST_ELEMENT(_gst_pipeline), nullptr, nullptr, GST_CLOCK_TIME_NONE) != GST_STATE_CHANGE_SUCCESS) {
-            RCLCPP_ERROR(_logger, "Could not set pipeline to playing!");
-            return;
-        }
-
-        RCLCPP_INFO(_logger, "Pipeline running...");
-    }
-
-    //XXX: Sample owns buffer, no need to unref
-    gst_sample_unref(sample_in);
-
     //Pull sample back out of pipeline
-    GstSample * sample_out = gst_app_sink_pull_sample(_gst_sink);
+    GstSample * sample_out = gst_app_sink_try_pull_sample(_gst_sink, GST_SECOND);
     if (!sample_out) {
         RCLCPP_ERROR(_logger, "Could not get gstreamer sample.");
         if(gst_app_sink_is_eos(_gst_sink))
