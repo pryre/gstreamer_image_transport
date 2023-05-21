@@ -1,10 +1,10 @@
 <library path="gstreamer_image_transport_component">
-  <class name="gstreamer_image_transport/gst_pub" type="gstreamer_image_transport::GStreamerPublisher" base_class_type="image_transport::PublisherPlugin">
+  <class name="image_transport/gst_pub" type="gstreamer_image_transport::GStreamerPublisher" base_class_type="image_transport::PublisherPlugin">
     <description>
       This plugin publishes a GStreamer encodes binary payload based on a set pipeline.
     </description>
   </class>
-  <class name="gstreamer_image_transport/gst_sub" type="gstreamer_image_transport::GStreamerSubscriber" base_class_type="image_transport::SubscriberPlugin">
+  <class name="image_transport/gst_sub" type="gstreamer_image_transport::GStreamerSubscriber" base_class_type="image_transport::SubscriberPlugin">
     <description>
       This plugin that recieves a GStreamer encoded binary payload and decodes it.
     </description>

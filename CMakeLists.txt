@@ -47,7 +47,7 @@ rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_t
 set(LIBRARY_NAME ${PROJECT_NAME}_component)
 
 # add the plugin example
-add_library(${LIBRARY_NAME} SHARED src/manifest.cpp src/gst_pub.cpp src/gst_sub.cpp)
+add_library(${LIBRARY_NAME} SHARED src/gst_pub.cpp src/gst_sub.cpp src/manifest.cpp)
 target_link_libraries(${LIBRARY_NAME}
   "${cpp_typesupport_target}"
   image_transport::image_transport
