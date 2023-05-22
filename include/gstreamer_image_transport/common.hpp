@@ -1,27 +1,26 @@
 #pragma once
 
-#include "gst/app/gstappsink.h"
-#include "gst/app/gstappsrc.h"
+#include <rcl/time.h>
 #include <string>
 #include <algorithm>
 #include <map>
 #include <unordered_map>
-
-#include <sensor_msgs/msg/image.hpp>
-#include <sensor_msgs/image_encodings.hpp>
-#include <chrono>
-
-#include <gst/gstpipeline.h>
-#include "gst/gstcapsfeatures.h"
-#include "gst/gststructure.h"
-#include "gstreamer_image_transport/common.hpp"
 #include <memory>
-#include <rclcpp/logger.hpp>
-#include <rclcpp/rclcpp.hpp>
-
 #include <chrono>
 #include <string_view>
 
+
+#include <gst/gstpipeline.h>
+#include "gst/gstcapsfeatures.h"
+#include "gst/gstclock.h"
+#include "gst/gststructure.h"
+#include "gst/app/gstappsink.h"
+#include "gst/app/gstappsrc.h"
+
+#include <rclcpp/logger.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/image_encodings.hpp>
 
 using namespace std::chrono_literals;
 
@@ -48,22 +47,28 @@ const std::unordered_map<std::string_view, std::string_view> ros_gst_image {{
 
 namespace common {
 
+const auto duration_zero = rclcpp::Duration(0, 0);
+const auto time_zero = rclcpp::Time(0, 0, RCL_ROS_TIME);
+
 constexpr std::string appsrc_name = "source";
 constexpr std::string appsink_name = "sink";
 constexpr std::string pipeline_split = "!";
 constexpr std::string pipeline_split_spaced = " ! ";
 constexpr std::string transport_name = "gst";
 
+inline GstClockTime ros_time_to_gst(const rclcpp::Duration& t) {
+    return GST_NSECOND*t.nanoseconds();
+}
 
 // trim from start (in place)
-static inline void ltrim(std::string &s) {
+inline void ltrim(std::string &s) {
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
         return !std::isspace(ch);
     }));
 }
 
 // trim from end (in place)
-static inline void rtrim(std::string &s) {
+inline void rtrim(std::string &s) {
     s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) {
         return !std::isspace(ch);
     }).base(), s.end());
@@ -96,10 +101,8 @@ inline GstState get_pipeline_state(GstPipeline* pipeline, std::chrono::system_cl
     GstClockTime gt = GST_CLOCK_TIME_NONE;
 
     if(timeout > std::chrono::system_clock::duration::zero()) {
-        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(timeout).count();
-        const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout - std::chrono::seconds(seconds)).count();
-        timespec ts {seconds, nanoseconds};
-        gt = GST_TIMESPEC_TO_TIME(ts);
+        const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout);
+        gt = GST_NSECOND*nanoseconds.count();
     }
 
     // const auto success = gst_element_get_state(GST_ELEMENT(_gst_pipeline), &current_state, &pending_state, gt);
@@ -258,6 +261,27 @@ inline void fill_image_details(const GstCaps* caps, sensor_msgs::msg::Image& ima
             image.encoding = format_str;
         }
     }
+}
+
+
+inline void send_keyframe(GstPad* pad, const GstClockTime timestamp, const GstClockTime stream_time, const GstClockTime running_time) {
+    //https://github.com/centricular/gstwebrtc-demos/issues/186
+    //https://gstreamer.freedesktop.org/documentation/additional/design/keyframe-force.html?gi-language=c
+
+    // "timestamp" (G_TYPE_UINT64): the timestamp of the buffer that triggered the event.
+    // "stream-time" (G_TYPE_UINT64): the stream position that triggered the event.
+    // "running-time" (G_TYPE_UINT64): the running time of the stream when the event was triggered.
+
+    const auto data = gst_structure_new(
+        "GstForceKeyUnit",
+        "all-headers", G_TYPE_BOOLEAN, TRUE,
+        "timestamp", G_TYPE_UINT64, timestamp,
+        "stream-time", G_TYPE_UINT64, stream_time,
+        "running-time", G_TYPE_UINT64, running_time,
+        NULL
+    );
+    const auto event = gst_event_new_custom(GST_EVENT_CUSTOM_DOWNSTREAM, data);
+    gst_pad_send_event(pad, event);
 }
 
 };

@@ -15,14 +15,17 @@ class GStreamerSubscriber : public image_transport::SimpleSubscriberPlugin
 public:
     GStreamerSubscriber();
     ~GStreamerSubscriber();
-    virtual std::string getTransportName() const { return common::transport_name; }
+    std::string getTransportName() const override { return common::transport_name; }
+    std::string getModuleName() const { return common::transport_name + "_sub"; }
 
 protected:
-  virtual void internalCallback(const typename gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & message, const Callback & user_cb);
+  void internalCallback(const typename gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & message, const Callback & user_cb) override;
+  void subscribeImpl(rclcpp::Node * node, const std::string & base_topic, const Callback & callback, rmw_qos_profile_t custom_qos) override;
 
 private:
     bool _has_shutdown;
     rclcpp::Logger _logger;
+    std::string _pipeline_internal;
     int64_t _queue_size;
     int64_t _force_debug_level;
     std::string _last_caps;
@@ -34,6 +37,8 @@ private:
     GstPipeline *_gst_pipeline;
     GstAppSrc *_gst_src;
     GstAppSink *_gst_sink;
+
+    rclcpp::Time _last_stamp;
 
     void gst_clean_up();
     void reset();

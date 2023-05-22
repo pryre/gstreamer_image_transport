@@ -1,8 +1,9 @@
+#include "gstreamer_image_transport/common.hpp"
 #include "gstreamer_image_transport/gst_sub.hpp"
 #include "gst/gstcaps.h"
 
 #include <memory>
-#include <sensor_msgs/msg/detail/image__struct.hpp>
+#include <sensor_msgs/msg/image.hpp>
 
 #include "gst/gst.h"
 #include "gst/app/gstappsrc.h"
@@ -32,12 +33,14 @@ namespace gstreamer_image_transport
 {
 
 GStreamerSubscriber::GStreamerSubscriber() :
-    _logger(rclcpp::get_logger("gst_sub")),
+    _logger(rclcpp::get_logger(getModuleName())),
+    _pipeline_internal("decodebin"),
     _queue_size(10),
-    _force_debug_level(5),
+    _force_debug_level(0),
     _gst_pipeline(nullptr),
     _gst_src(nullptr),
-    _gst_sink(nullptr)
+    _gst_sink(nullptr),
+    _last_stamp(common::time_zero)
 {
     // // Get encoder parameters
     // const auto param_prefix = getTransportName() + ".";
@@ -55,14 +58,36 @@ GStreamerSubscriber::GStreamerSubscriber() :
     // _force_debug_level = node->declare_parameter(param_prefix + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
 
     //Get the last step in the encoder
-    reset();
+    // reset();
 }
+
+
+  void GStreamerSubscriber::subscribeImpl(rclcpp::Node * node, const std::string & base_topic, const Callback & callback, rmw_qos_profile_t custom_qos) {
+    //Correct our logger name
+    _logger = node->get_logger().get_child(getModuleName());
+
+    // Get encoder parameters
+    const auto param_prefix = getModuleName() + ".";
+
+    auto pipeline_internal_desc = rcl_interfaces::msg::ParameterDescriptor{};
+    pipeline_internal_desc.description = "Encoding pipeline to use, will be prefixed by appsrc and postfixed with appsink at runtime";
+    _pipeline_internal = common::trim_copy(node->declare_parameter(param_prefix + "pipeline", _pipeline_internal, pipeline_internal_desc));
+
+    auto force_gst_debug_desc = rcl_interfaces::msg::ParameterDescriptor{};
+    force_gst_debug_desc.description = "Forces GST to output debug data messages at specified level";
+    _force_debug_level = node->declare_parameter(param_prefix + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
+
+    //Do implicit advertising
+    SimpleSubscriberPlugin::subscribeImpl(node, base_topic, callback, custom_qos);
+  }
 
 GStreamerSubscriber::~GStreamerSubscriber() {
     gst_clean_up();
 }
 
 void GStreamerSubscriber::reset() {
+    _last_stamp = common::time_zero;
+
     //If we have a pipeline already, clean up and start over
     if(_gst_pipeline) {
         RCLCPP_INFO(_logger, "Cleaning previous pipeline...");
@@ -70,7 +95,7 @@ void GStreamerSubscriber::reset() {
         gst_clean_up();
     }
 
-    if(!common::gst_configure(_logger, "decodebin", &_gst_pipeline, &_gst_src, &_gst_sink, _queue_size, _force_debug_level)) {
+    if(!common::gst_configure(_logger, _pipeline_internal, &_gst_pipeline, &_gst_src, &_gst_sink, _queue_size, _force_debug_level)) {
         gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
@@ -93,14 +118,23 @@ void GStreamerSubscriber::internalCallback(
   const gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & msg,
   const Callback & user_cb) {
 
+    const auto frame_stamp = rclcpp::Time(msg->header.stamp);
+    const auto frame_delta = frame_stamp - _last_stamp;
+    //TODO: Check that ROS time has been reset, and if so, reset stream
+
+    if(frame_delta < common::duration_zero) {
+        RCLCPP_WARN_STREAM(_logger, "Discarding frame due to old stamp: " << frame_delta.to_chrono<std::chrono::milliseconds>());
+        return;
+    }
+
     if(_last_caps != msg->caps) {
         if(!_last_caps.empty()) {
-            RCLCPP_WARN_STREAM(_logger, "Message caps varied: " << msg->caps);
-            reset();
+            RCLCPP_WARN_STREAM(_logger, "Stream caps varied: " << msg->caps);
         } else {
-            RCLCPP_INFO_STREAM(_logger, "Stream started: " << msg->caps);
+            RCLCPP_INFO_STREAM(_logger, "Stream caps: " << msg->caps);
         }
 
+        reset();
         _last_caps = msg->caps;
     }
 

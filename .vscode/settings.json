@@ -7,9 +7,14 @@
         "gint",
         "gpointer",
         "gstreamer",
+        "jpegenc",
+        "NSECOND",
         "PLUGINLIB",
         "preroll",
         "rawvideoparse",
-        "UYVY"
+        "ultrafast",
+        "UYVY",
+        "videoconvert",
+        "zerolatency"
     ]
 }

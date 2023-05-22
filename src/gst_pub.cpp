@@ -1,3 +1,5 @@
+#include "gst/gstevent.h"
+#include "gstreamer_image_transport/common.hpp"
 #include "gstreamer_image_transport/gst_pub.hpp"
 
 #include <bits/chrono.h>
@@ -5,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <chrono>
+#include <rcl/time.h>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/parameter_type.hpp>
 #include <rclcpp/duration.hpp>
@@ -51,12 +54,14 @@ namespace gstreamer_image_transport
 {
 
 GStreamerPublisher::GStreamerPublisher() :
-    _logger(rclcpp::get_logger("gst_pub")),
+    _logger(rclcpp::get_logger(getModuleName())),
     _queue_size(10),
-    _force_debug_level(5),
+    _force_debug_level(0),
     _gst_pipeline(nullptr),
     _gst_src(nullptr),
-    _gst_sink(nullptr)
+    _gst_sink(nullptr),
+    _first_stamp(common::time_zero),
+    _last_stamp(common::time_zero)
 {
     //TODO: ???
 }
@@ -95,12 +100,20 @@ void GStreamerPublisher::gst_clean_up() {
     _has_shutdown = true;
 }
 
+//TODO: Keyframes on some regular basis or when subscribers join
+// if(GST_IS_ELEMENT(_gst_src)) {
+//     const auto sink_pad = gst_element_get_static_pad(GST_ELEMENT(_gst_src), "sink_0");
+//      send_keyframe(sink_pad, ...);
+// } else {
+//     RCLCPP_WARN(_logger, "Keyframe request ignored, pipeline not ready");
+// }
+
 void GStreamerPublisher::advertiseImpl(rclcpp::Node * node, const std::string & base_topic, rmw_qos_profile_t custom_qos) {
     //Correct our logger name
-    _logger = node->get_logger().get_child("gst_pub");
+    _logger = node->get_logger().get_child(getModuleName());
 
     // Get encoder parameters
-    const auto param_prefix = getTransportName() + ".";
+    const auto param_prefix = getModuleName() + ".";
 
     auto pipeline_internal_desc = rcl_interfaces::msg::ParameterDescriptor{};
     pipeline_internal_desc.description = "Encoding pipeline to use, will be prefixed by appsrc and postfixed with appsink at runtime";
@@ -116,7 +129,7 @@ void GStreamerPublisher::advertiseImpl(rclcpp::Node * node, const std::string & 
 
     //Get the last step in the encoder
     const auto int_split = pipeline_internal.rfind(common::pipeline_split);
-    _encoder_hint = pipeline_internal.substr(int_split == std::string::npos ? 0 : int_split);
+    _encoder_hint = pipeline_internal.substr(int_split == std::string::npos ? 0 : (int_split < (pipeline_internal.size() - 1)) ? int_split + 1 : int_split);
     common::trim(_encoder_hint);
 
     RCLCPP_INFO_STREAM(_logger, "Encoder hint: \"" << _encoder_hint << "\"");
@@ -165,6 +178,39 @@ void GStreamerPublisher::publish(
         return;
     }
 
+    //XXX: At this point we should have a supported stream (assuming pipeline is happy with it)
+    const auto frame_stamp = rclcpp::Time(message.header.stamp);
+
+    //Perform all of our time calculations in lock
+    _mutex.lock();
+    if(_first_stamp == common::time_zero) {
+        _first_stamp = frame_stamp;
+    }
+    const auto stream_delta = frame_stamp - _first_stamp;
+    const auto frame_delta = frame_stamp - _last_stamp;
+    //Do check logic here to avoid mismatch errors
+    const bool stream_delta_ok = stream_delta >= common::duration_zero;
+    const bool frame_delta_ok = frame_delta >= common::duration_zero;
+    if(stream_delta_ok && frame_delta_ok) _last_stamp = frame_stamp;
+    _mutex.unlock();
+
+    //Handle the outcomes of the logic after unlocking
+    if(!stream_delta_ok) {
+        RCLCPP_WARN_STREAM(_logger, "Discarding frame, originated before stream start: " << stream_delta.to_chrono<std::chrono::milliseconds>());
+
+        //TODO: Could also do a rclcpp time check here to see if sim time has reset, and reset all from that
+        return;
+    }
+
+    if(!frame_delta_ok) {
+        RCLCPP_WARN_STREAM(_logger, "Discarding frame due to old stamp: " << frame_delta.to_chrono<std::chrono::milliseconds>());
+        return;
+    }
+
+
+    // RCLCPP_INFO_STREAM(_logger, "Frame delta: " << frame_delta.to_chrono<std::chrono::milliseconds>());
+    //XXX: At this point we should be confident that the stream is monotonic and we have a valid stamp
+
     const size_t data_size = message.data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
     auto mem_in = gst_memory_new_wrapped(
         GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
@@ -173,21 +219,28 @@ void GStreamerPublisher::publish(
         nullptr, nullptr
     );
 
+    // RCLCPP_INFO(_logger, "BUFFER");
     GstBuffer* buffer_in = gst_buffer_new();
     gst_buffer_append_memory(buffer_in, mem_in);
-    const timespec ts {message.header.stamp.sec, message.header.stamp.nanosec};
-    const auto g_stamp = GST_TIMESPEC_TO_TIME(ts);
+    //XXX: Use the stream delta to calculate our buffer timings
+    const auto g_stamp = common::ros_time_to_gst(stream_delta);
+    const auto g_delta = common::ros_time_to_gst(frame_delta);
 
-    //TODO: Figure out how to do this
-    // GST_BUFFER_PTS(buffer_in) = _last_pts++;
-    // GST_BUFFER_DTS(buffer_in) = _last_dts++;
+    // RCLCPP_INFO(_logger, "BUFFER_TIME");
+    GST_BUFFER_PTS(buffer_in) = g_stamp;
+    GST_BUFFER_DTS(buffer_in) = g_stamp;
+    GST_BUFFER_OFFSET(buffer_in) = g_stamp;
+    GST_BUFFER_DURATION(buffer_in) = g_delta;
 
-    gst_buffer_add_reference_timestamp_meta(buffer_in, caps_in, g_stamp, GST_CLOCK_TIME_NONE);
-    auto segment_in = gst_segment_new();
-    gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
-    gst_segment_position_from_running_time(segment_in, GstFormat::GST_FORMAT_TIME, g_stamp);
+    // gst_buffer_add_reference_timestamp_meta(buffer_in, caps_in, g_stamp, GST_CLOCK_TIME_NONE);
+    // auto segment_in = gst_segment_new();
+    // gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
+    // gst_segment_position_from_running_time(segment_in, GstFormat::GST_FORMAT_TIME, g_stamp);
 
-    const auto sample_in = gst_sample_new(buffer_in, caps_in, segment_in, nullptr);
+    // RCLCPP_INFO(_logger, "SAMPLE");
+    const auto sample_in = gst_sample_new(buffer_in, caps_in, nullptr, nullptr);
+
+    // RCLCPP_INFO(_logger, "PUSH");
     const auto push_result = gst_app_src_push_sample(_gst_src, sample_in);
     //XXX: Sample owns buffer, no need to unref
     gst_sample_unref(sample_in);
