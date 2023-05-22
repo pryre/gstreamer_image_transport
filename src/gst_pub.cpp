@@ -63,11 +63,72 @@ GStreamerPublisher::GStreamerPublisher() :
     _first_stamp(common::time_zero),
     _last_stamp(common::time_zero)
 {
-    //TODO: ???
+    //TODO: Check
+    _context = g_main_context_default();
+    _thread = std::thread(&GStreamerPublisher::_gst_run(), this);
 }
 
 
-void GStreamerPublisher::gst_clean_up() {
+void GStreamerPublisher::_gst_run() {
+    //TODO: Check
+    _loop = g_main_loop_new(_context, true);
+    g_main_loop_run(_loop);
+}
+
+void GStreamerPublisher::_gst_stop() {
+  if (_thread.joinable()) {
+    //TODO: Check
+    g_main_loop_quit(_loop);
+    _thread.join();
+  }
+}
+
+GStreamerPublisher::~GStreamerPublisher() {
+    //TODO: Check
+    _gst_clean_up();
+    _gst_stop();
+}
+
+void GStreamerPublisher::shutdown() {
+    reset();
+    _pub.reset();
+}
+
+
+void GStreamerPublisher::reset() {
+    _first_stamp = common::time_zero;
+    _last_stamp = common::time_zero;
+
+    //If we have a pipeline already, clean up and start over
+    if(_gst_pipeline) {
+        RCLCPP_INFO(_logger, "Cleaning previous pipeline...");
+        gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_NULL);
+        _gst_clean_up();
+    }
+}
+
+void GStreamerPublisher::start() {
+    if(!common::gst_configure(_logger, _pipeline_internal, &_gst_pipeline, &_gst_src, &_gst_sink, _queue_size, _force_debug_level)) {
+        _gst_clean_up();
+        const auto msg = "Unable to configure GStreamer";
+        RCLCPP_FATAL_STREAM(_logger, msg);
+        throw std::runtime_error(msg);
+    }
+
+    const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_PLAYING);
+    if(set_ret == GST_STATE_CHANGE_ASYNC) {
+        RCLCPP_WARN(_logger, "Waiting for system stream to ready...");
+    } else if(set_ret != GST_STATE_CHANGE_SUCCESS) {
+        const auto msg = "Could not set pipeline to playing!";
+        RCLCPP_ERROR(_logger, msg);
+        throw std::runtime_error(msg);
+    } else {
+        RCLCPP_INFO(_logger, "Started stream!");
+    }
+}
+
+
+void GStreamerPublisher::_gst_clean_up() {
     if(_has_shutdown)
         return;
 
@@ -108,63 +169,42 @@ void GStreamerPublisher::gst_clean_up() {
 //     RCLCPP_WARN(_logger, "Keyframe request ignored, pipeline not ready");
 // }
 
-void GStreamerPublisher::advertiseImpl(rclcpp::Node * node, const std::string & base_topic, rmw_qos_profile_t custom_qos) {
+void GStreamerPublisher::advertiseImpl(rclcpp::Node* nh, const std::string& base_topic, rmw_qos_profile_t custom_qos) {
     //Correct our logger name
-    _logger = node->get_logger().get_child(getModuleName());
+    _node = nh;
+    _logger = _node->get_logger().get_child(getModuleName());
 
     // Get encoder parameters
     const auto param_prefix = getModuleName() + ".";
 
     auto pipeline_internal_desc = rcl_interfaces::msg::ParameterDescriptor{};
     pipeline_internal_desc.description = "Encoding pipeline to use, will be prefixed by appsrc and postfixed with appsink at runtime";
-    const std::string pipeline_internal = common::trim_copy(node->declare_parameter(param_prefix + "pipeline", "", pipeline_internal_desc));
+    _pipeline_internal = common::trim_copy(_node->declare_parameter(param_prefix + "pipeline", "", pipeline_internal_desc));
 
     auto queue_size_desc = rcl_interfaces::msg::ParameterDescriptor{};
     queue_size_desc.description = "Queue size for the input frame buffer (frames will be dropped if too many are queued)";
-    _queue_size = node->declare_parameter(param_prefix + "frame_queue_size", _queue_size, queue_size_desc);
+    _queue_size = _node->declare_parameter(param_prefix + "frame_queue_size", _queue_size, queue_size_desc);
 
     auto force_gst_debug_desc = rcl_interfaces::msg::ParameterDescriptor{};
     force_gst_debug_desc.description = "Forces GST to output debug data messages at specified level";
-    _force_debug_level = node->declare_parameter(param_prefix + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
+    _force_debug_level = _node->declare_parameter(param_prefix + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
 
     //Get the last step in the encoder
-    const auto int_split = pipeline_internal.rfind(common::pipeline_split);
-    _encoder_hint = pipeline_internal.substr(int_split == std::string::npos ? 0 : (int_split < (pipeline_internal.size() - 1)) ? int_split + 1 : int_split);
+    const auto int_split = _pipeline_internal.rfind(common::pipeline_split);
+    _encoder_hint = _pipeline_internal.substr(int_split == std::string::npos ? 0 : (int_split < (_pipeline_internal.size() - 1)) ? int_split + 1 : int_split);
     common::trim(_encoder_hint);
 
     RCLCPP_INFO_STREAM(_logger, "Encoder hint: \"" << _encoder_hint << "\"");
 
-    if(!common::gst_configure(_logger, pipeline_internal, &_gst_pipeline, &_gst_src, &_gst_sink, _queue_size, _force_debug_level)) {
-        gst_clean_up();
-        const auto msg = "Unable to configure GStreamer";
-        RCLCPP_FATAL_STREAM(_logger, msg);
-        throw std::runtime_error(msg);
-    }
+    const std::string transport_topic = _get_topic(base_topic);
+    const auto qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(custom_qos), custom_qos);
+    _pub = _node->create_publisher<TransportType>(transport_topic, qos);
 
-    const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_PLAYING);
-    if(set_ret == GST_STATE_CHANGE_ASYNC) {
-        RCLCPP_WARN(_logger, "Waiting for system stream to ready...");
-    } else if(set_ret != GST_STATE_CHANGE_SUCCESS) {
-        const auto msg = "Could not set pipeline to playing!";
-        RCLCPP_ERROR(_logger, msg);
-        throw std::runtime_error(msg);
-    } else {
-        RCLCPP_INFO(_logger, "Started stream!");
-    }
-
-    //Do implicit advertising
-    SimplePublisherPlugin::advertiseImpl(node, base_topic, custom_qos);
+    start();
 }
 
-GStreamerPublisher::~GStreamerPublisher() {
-    gst_clean_up();
-}
-
-void GStreamerPublisher::publish(
-  const sensor_msgs::msg::Image & message,
-  const PublishFn & publish_fn) const
-{
-    if(getNumSubscribers() <= 0) {
+void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const {
+    if(!_pub || (getNumSubscribers() <= 0)) {
         return;
     }
 
@@ -278,7 +318,7 @@ void GStreamerPublisher::publish(
     packet.extra = info_out ? gst_structure_to_string(info_out) : "";
     packet.data.assign(data_out.begin(), data_out.end());
 
-    publish_fn(packet);
+    _pub->publish(packet);
 
     gst_sample_unref(sample_out);
 }

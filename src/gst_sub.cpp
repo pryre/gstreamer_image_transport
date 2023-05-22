@@ -82,7 +82,7 @@ GStreamerSubscriber::GStreamerSubscriber() :
   }
 
 GStreamerSubscriber::~GStreamerSubscriber() {
-    gst_clean_up();
+    _gst_clean_up();
 }
 
 void GStreamerSubscriber::reset() {
@@ -92,11 +92,13 @@ void GStreamerSubscriber::reset() {
     if(_gst_pipeline) {
         RCLCPP_INFO(_logger, "Cleaning previous pipeline...");
         gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_NULL);
-        gst_clean_up();
+        _gst_clean_up();
     }
+}
 
+void GStreamerSubscriber::start() {
     if(!common::gst_configure(_logger, _pipeline_internal, &_gst_pipeline, &_gst_src, &_gst_sink, _queue_size, _force_debug_level)) {
-        gst_clean_up();
+        _gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
         throw std::runtime_error(msg);
@@ -134,8 +136,19 @@ void GStreamerSubscriber::internalCallback(
             RCLCPP_INFO_STREAM(_logger, "Stream caps: " << msg->caps);
         }
 
-        reset();
         _last_caps = msg->caps;
+        //Always try to reset the pipeline if caps change
+        reset();
+
+        //Start the pipeline here as long as we don't have an empty caps message
+        if(!_last_caps.empty()) {
+            start();
+        }
+    }
+
+    if(_last_caps.empty()) {
+        RCLCPP_WARN_STREAM(_logger, "Invalid packet: no caps set");
+        return;
     }
 
     auto caps_in = gst_caps_from_string(msg->caps.c_str());
@@ -203,7 +216,7 @@ void GStreamerSubscriber::internalCallback(
     user_cb(image);
 }
 
-void GStreamerSubscriber::gst_clean_up() {
+void GStreamerSubscriber::_gst_clean_up() {
     if(_has_shutdown)
         return;
 

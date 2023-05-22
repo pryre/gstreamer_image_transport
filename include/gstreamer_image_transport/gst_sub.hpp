@@ -18,6 +18,9 @@ public:
     std::string getTransportName() const override { return common::transport_name; }
     std::string getModuleName() const { return common::transport_name + "_sub"; }
 
+    void reset();
+    void start();
+
 protected:
   void internalCallback(const typename gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & message, const Callback & user_cb) override;
   void subscribeImpl(rclcpp::Node * node, const std::string & base_topic, const Callback & callback, rmw_qos_profile_t custom_qos) override;
@@ -40,8 +43,7 @@ private:
 
     rclcpp::Time _last_stamp;
 
-    void gst_clean_up();
-    void reset();
+    void _gst_clean_up();
 };
 
 };
