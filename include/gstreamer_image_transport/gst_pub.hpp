@@ -13,8 +13,8 @@
 #include "gst/gstelement.h"
 #include "gst/gstpipeline.h"
 #include "gstreamer_image_transport/common.hpp"
+#include "gstreamer_image_transport/tooling.hpp"
 #include "gstreamer_image_transport/msg/data_packet.hpp"
-#include "gstreamer_image_transport/msg/detail/data_packet__struct.hpp"
 #include "image_transport/simple_publisher_plugin.hpp"
 #include <sensor_msgs/image_encodings.hpp>
 #include <string_view>
@@ -72,7 +72,7 @@ private:
 
     // Gstreamer structures
     std::thread _thread;
-    gstreamer_context_data _gst;
+    tooling::gstreamer_context_data _gst;
 
     mutable std::mutex _mutex;
     mutable rclcpp::Time _first_stamp;

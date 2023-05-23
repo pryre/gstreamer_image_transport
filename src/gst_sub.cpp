@@ -158,10 +158,10 @@ void GStreamerSubscriber::start() {
     _has_shutdown = false;
 
     //Init GST and configure debug level as requested
-    common::gst_do_init(_logger);
-    common::gst_set_debug_level(_force_debug_level);
+    tooling::gst_do_init(_logger);
+    tooling::gst_set_debug_level(_force_debug_level);
 
-    if(!common::gst_configure(_logger, _pipeline_internal, _gst)) {
+    if(!tooling::gst_configure(_logger, _pipeline_internal, _gst)) {
         _gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
@@ -170,7 +170,7 @@ void GStreamerSubscriber::start() {
 
     gst_app_src_set_max_buffers(_gst.source, _queue_size);
     gst_app_sink_set_max_buffers(_gst.sink, _queue_size);
-    common::configure_pipeline_callbacks(_gst);
+    tooling::configure_pipeline_callbacks(_gst);
 
     const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst.pipeline), GST_STATE_PLAYING);
     if(set_ret == GST_STATE_CHANGE_SUCCESS) {

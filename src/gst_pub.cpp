@@ -151,10 +151,10 @@ void GStreamerPublisher::start() {
     _has_shutdown = false;
 
     //Init GST and configure debug level as requested
-    common::gst_do_init(_logger);
-    common::gst_set_debug_level(_force_debug_level);
+    tooling::gst_do_init(_logger);
+    tooling::gst_set_debug_level(_force_debug_level);
 
-    if(!common::gst_configure(_logger, _pipeline_internal, _gst)) {
+    if(!tooling::gst_configure(_logger, _pipeline_internal, _gst)) {
         _gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
@@ -164,7 +164,7 @@ void GStreamerPublisher::start() {
     gst_app_src_set_max_buffers(_gst.source, _queue_size);
     gst_app_sink_set_max_buffers(_gst.sink, _queue_size);
     // gst_app_src_set_max_bytes(_gst.source, 10000000); //TODO
-    common::configure_pipeline_callbacks(_gst);
+    tooling::configure_pipeline_callbacks(_gst);
 
     const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst.pipeline), GST_STATE_PLAYING);
     if(set_ret == GST_STATE_CHANGE_SUCCESS) {
@@ -358,7 +358,6 @@ bool GStreamerPublisher::_receive_sample(GstSample* sample) {
     //There is no guarantee that this packet is one image, a piece of an image, or something else
     packet.header.stamp = _node->get_clock()->now();
 
-    RCLCPP_ERROR(_logger, "PACK1");
     //Get packet data
     const auto caps = gst_sample_get_caps(sample);
     packet.header.frame_id = common::frame_id_from_caps(caps);  //TODO: Work this out
@@ -366,7 +365,6 @@ bool GStreamerPublisher::_receive_sample(GstSample* sample) {
     packet.encoder = _encoder_hint;
     // packet.extra = info_out ? gst_structure_to_string(info_out) : "";
 
-    RCLCPP_ERROR(_logger, "PACK2");
     //Get data
     GstMapInfo map;
     const auto buffer = gst_sample_get_buffer(sample);
@@ -374,12 +372,10 @@ bool GStreamerPublisher::_receive_sample(GstSample* sample) {
         RCLCPP_ERROR(_logger, "Cannot read sample data!");
         return false;
     }
-    RCLCPP_ERROR(_logger, "PACK3");
     const auto data = std::span(map.data, map.size);
     packet.data.assign(data.begin(), data.end());
     gst_buffer_unmap (buffer, &map);
 
-    RCLCPP_ERROR(_logger, "PACK4");
     _pub->publish(packet);
 
     return true;

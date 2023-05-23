@@ -5,6 +5,7 @@
 #include <string>
 
 #include "gstreamer_image_transport/common.hpp"
+#include "gstreamer_image_transport/tooling.hpp"
 #include "image_transport/simple_subscriber_plugin.hpp"
 #include "gstreamer_image_transport/msg/data_packet.hpp"
 
@@ -61,7 +62,7 @@ private:
 
     // Gstreamer structures
     std::thread _thread;
-    gstreamer_context_data _gst;
+    tooling::gstreamer_context_data _gst;
 
     rclcpp::Time _last_stamp;
 };
