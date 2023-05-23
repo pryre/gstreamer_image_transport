@@ -1,6 +1,10 @@
 #pragma once
 
+#include <atomic>
+#include <functional>
 #include <rcl/time.h>
+#include <rclcpp/context.hpp>
+#include <rclcpp/utilities.hpp>
 #include <string>
 #include <algorithm>
 #include <map>
@@ -13,6 +17,7 @@
 #include <gst/gstpipeline.h>
 #include "gst/gstcapsfeatures.h"
 #include "gst/gstclock.h"
+#include "gst/gstpad.h"
 #include "gst/gststructure.h"
 #include "gst/app/gstappsink.h"
 #include "gst/app/gstappsrc.h"
@@ -26,6 +31,76 @@ using namespace std::chrono_literals;
 
 namespace gstreamer_image_transport
 {
+
+using ReceiveSample = std::function<bool(GstSample* sample)>;
+
+struct gstreamer_context_data {
+    // GMainContext* _context;
+    // GMainLoop* loop = nullptr;
+    GstPipeline *pipeline = nullptr;
+    GstAppSrc *source = nullptr;
+    GstAppSink *sink = nullptr;
+    std::atomic<bool> feed_open = false;
+
+    //XXX: These should be set before use
+    ReceiveSample receive_sample;
+    rclcpp::Logger* logger = nullptr;
+};
+
+// using StartFeedCB = std::function<void(GstElement, guint, gstreamer_context_data)>;
+// using StopFeedCB = std::function<void(GstElement, gstreamer_context_data)>;
+// using SampleReadyCB = std::function<GstFlowReturn(GstElement, GstMessage , gstreamer_context_data)>;
+// using ErrorCB = std::function<void(GstBus, GstMessage, gstreamer_context_data)>;
+
+static void start_feed([[maybe_unused]]GstElement *source, [[maybe_unused]] guint size, gstreamer_context_data *context) {
+    context->feed_open = true;
+    // if(context->logger) RCLCPP_WARN(*(context->logger), "START");
+}
+
+static void stop_feed([[maybe_unused]]GstElement *source, gstreamer_context_data *context) {
+    context->feed_open = false;
+    // if(context->logger) RCLCPP_WARN(*(context->logger), "STOP");
+}
+
+// static GstFlowReturn sample_ready(GstElement *sink, gstreamer_context_data *context) {
+//     GstSample *sample;
+//     GstFlowReturn flow = GST_FLOW_ERROR;
+//     if(context->logger) RCLCPP_WARN(*(context->logger), "PULL");
+//     // Retrieve the buffer
+//     g_signal_emit_by_name (sink, "pull-sample", &sample);
+//     if (sample) {
+//         if(context->receive_sample(sample))
+//             flow = GST_FLOW_OK;
+
+//         gst_sample_unref (sample);
+//     }
+
+//     return flow;
+// }
+
+static void error_cb([[maybe_unused]] GstBus *bus, GstMessage *msg, gstreamer_context_data *context) {
+    GError *err;
+    gchar *debug_info;
+
+    /* Print error details on the screen */
+    gst_message_parse_error (msg, &err, &debug_info);
+    g_printerr ("Error received from element %s: %s\n", GST_OBJECT_NAME (msg->src), err->message);
+    g_printerr ("Debugging information: %s\n", debug_info ? debug_info : "none");
+    if(context->logger) {
+        RCLCPP_FATAL_STREAM(*(context->logger), "Error received from element " << GST_OBJECT_NAME (msg->src) << ": " << err->message);
+        RCLCPP_FATAL_STREAM(*(context->logger), "Debugging information: " << (debug_info ? debug_info : "none"));
+    }
+    g_clear_error (&err);
+    g_free (debug_info);
+
+    // g_main_loop_quit (context->loop);
+
+    if(context->pipeline) {
+        gst_element_set_state(GST_ELEMENT(context->pipeline), GST_STATE_NULL);
+    }
+    rclcpp::shutdown(nullptr, "Critical GStreamer error");
+}
+
 
 
 namespace encoding {
@@ -43,6 +118,10 @@ const std::unordered_map<std::string_view, std::string_view> ros_gst_image {{
     {"png", "image/png"},
 }};
 
+const auto sample_info_name = "ros-frame";
+const auto sample_info_frame_id = "id";
+const auto sample_info_stamp = "stamp";
+
 };
 
 namespace common {
@@ -55,6 +134,10 @@ constexpr std::string appsink_name = "sink";
 constexpr std::string pipeline_split = "!";
 constexpr std::string pipeline_split_spaced = " ! ";
 constexpr std::string transport_name = "gst";
+
+inline std::string get_topic(const std::string& base_topic, const std::string& transport_name) {
+    return base_topic + "/" + transport_name;
+}
 
 inline GstClockTime ros_time_to_gst(const rclcpp::Duration& t) {
     return GST_NSECOND*t.nanoseconds();
@@ -115,20 +198,28 @@ inline GstState get_pipeline_state(GstPipeline* pipeline, std::chrono::system_cl
     return current_state;
 }
 
-inline bool gst_configure(const rclcpp::Logger logger, const std::string pipeline_internal, GstPipeline** pipeline, GstAppSrc** source, GstAppSink** sink, const int64_t src_queue_size, const int64_t debug_level = 0){
+inline void gst_do_init(const rclcpp::Logger logger) {
     RCLCPP_INFO_STREAM(logger, "Initializing gstreamer...");
     gst_init(nullptr, nullptr);
     RCLCPP_INFO_STREAM(logger, "GStreamer Version: " << gst_version_string() );
+}
 
-    if (!gst_debug_is_active() && debug_level) {
-        gst_debug_set_active(TRUE);
-        GstDebugLevel level = gst_debug_get_default_threshold();
-        if (level < GST_LEVEL_ERROR) {
-            level = GST_LEVEL_ERROR;
-            gst_debug_set_default_threshold(level);
-        }
+inline void gst_set_debug_level(const int64_t debug_level) {
+    if(debug_level >= 0) {
+        GstDebugLevel level = (debug_level >= GstDebugLevel::GST_LEVEL_MEMDUMP) ? GstDebugLevel::GST_LEVEL_MEMDUMP : static_cast<GstDebugLevel>(debug_level);
+        gst_debug_set_active(level != GstDebugLevel::GST_LEVEL_NONE);
+        gst_debug_set_default_threshold(level);
+        // if (gst_debug_is_active()) {
+        //     GstDebugLevel level = gst_debug_get_default_threshold();
+        //     if (level < GST_LEVEL_ERROR) {
+        //         level = GST_LEVEL_ERROR;
+        //     }
+        // }
     }
+}
 
+//XXX: This should always be called after `gst_do_init()`
+inline bool gst_configure(const rclcpp::Logger logger, const std::string pipeline_internal, gstreamer_context_data& context) {
     //Append our parts to the pipeline
     const auto pipeline_str = get_appsrc_str()
                             + (pipeline_internal.empty() ? "" : pipeline_split_spaced + pipeline_internal)
@@ -146,10 +237,10 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
         return false;
     }
 
-    *pipeline = GST_PIPELINE(try_pipeline);
+    context.pipeline = GST_PIPELINE(try_pipeline);
 
-    const auto appsrc = gst_bin_get_by_name(GST_BIN(*pipeline), appsrc_name.c_str());
-    const auto appsink = gst_bin_get_by_name(GST_BIN(*pipeline), appsink_name.c_str());
+    const auto appsrc = gst_bin_get_by_name(GST_BIN(context.pipeline), appsrc_name.c_str());
+    const auto appsink = gst_bin_get_by_name(GST_BIN(context.pipeline), appsink_name.c_str());
 
     const auto src_ok = GST_IS_APP_SRC(appsrc);
     const auto sink_ok = GST_IS_APP_SINK(appsink);
@@ -166,31 +257,50 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
         return false;
     }
 
-    *source = GST_APP_SRC(appsrc);
-    *sink = GST_APP_SINK(appsink);
+    context.source = GST_APP_SRC(appsrc);
+    context.sink = GST_APP_SINK(appsink);
 
     g_object_set(
-        G_OBJECT(*source),
+        G_OBJECT(context.source),
         "is-live", true,
         "format", GST_FORMAT_TIME,
         nullptr
     );
 
-    gst_app_src_set_max_buffers(*source, src_queue_size);
-    // gst_app_src_set_max_bytes(_gst_src, 10000000); //TODO
+    // gst_app_sink_set_emit_signals(context.sink, true);
+    // g_object_set(
+    //     G_OBJECT(context.sink),
+    //     "emit-signals", true,
+    //     nullptr
+    // );
 
     RCLCPP_INFO_STREAM(logger, "Initializing stream...");
 
-    if(get_pipeline_state(*pipeline, 1s) == GST_STATE_NULL) {
-        RCLCPP_INFO_STREAM(logger, "Setting stream ready...");
-        if (gst_element_set_state(GST_ELEMENT(*pipeline), GST_STATE_READY) == GST_STATE_CHANGE_FAILURE) {
-            const auto msg = "Could not initialise stream!";
-            RCLCPP_FATAL_STREAM(logger, msg);
-            return false;
-        }
+    RCLCPP_INFO_STREAM(logger, "Setting stream ready...");
+    if (gst_element_set_state(GST_ELEMENT(context.pipeline), GST_STATE_READY) == GST_STATE_CHANGE_FAILURE) {
+        const auto msg = "Could not initialise stream!";
+        RCLCPP_FATAL_STREAM(logger, msg);
+        return false;
     }
 
-    return get_pipeline_state(*pipeline, 5s) == GST_STATE_READY;
+    return true;
+}
+
+//In a C++ world, these callbacks are (as defined above):
+// StartFeedCB:     std::function<void(GstElement, guint, gstreamer_context_data)>;
+// StopFeedCB:      std::function<void(GstElement, gstreamer_context_data)>;
+// SampleReadyCB:   std::function<GstFlowReturn(GstElement, GstMessage , gstreamer_context_data)>;
+// ErrorCB:         std::function<void(GstBus, GstMessage, gstreamer_context_data)>;
+inline void configure_pipeline_callbacks(gstreamer_context_data& context) {
+    g_signal_connect (context.source, "need-data", G_CALLBACK(start_feed), &context);
+    g_signal_connect (context.source, "enough-data", G_CALLBACK(stop_feed), &context);
+    // g_signal_connect (context.sink, "new-sample", G_CALLBACK(sample_ready), &context);
+
+    /* Instruct the bus to emit signals for each received message, and connect to the interesting signals */
+    auto bus = gst_element_get_bus(GST_ELEMENT(context.pipeline));
+    gst_bus_add_signal_watch(bus);
+    g_signal_connect(G_OBJECT(bus), "message::error", G_CALLBACK(error_cb), &context);
+    gst_object_unref(bus);
 }
 
 inline bool wait_for_pipeline_state_change(GstPipeline* pipeline) {
@@ -218,6 +328,15 @@ inline GstCaps* get_caps(const sensor_msgs::msg::Image& image) {
     }
 
     return caps;
+}
+
+inline GstStructure* get_info(std_msgs::msg::Header header) {
+    return gst_structure_new(
+        encoding::sample_info_name,
+        encoding::sample_info_frame_id, G_TYPE_STRING, header.frame_id.c_str(),
+        encoding::sample_info_stamp, G_TYPE_INT64, rclcpp::Time(header.stamp).nanoseconds(),
+        nullptr
+    );
 }
 
 inline void fill_image_details(const GstCaps* caps, sensor_msgs::msg::Image& image) {

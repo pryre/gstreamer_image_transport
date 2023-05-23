@@ -5,6 +5,7 @@
 #include <bits/chrono.h>
 #include <bits/types/struct_timespec.h>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <chrono>
 #include <rcl/time.h>
@@ -56,37 +57,60 @@ namespace gstreamer_image_transport
 GStreamerPublisher::GStreamerPublisher() :
     _logger(rclcpp::get_logger(getModuleName())),
     _queue_size(10),
-    _force_debug_level(0),
-    _gst_pipeline(nullptr),
-    _gst_src(nullptr),
-    _gst_sink(nullptr),
+    _force_debug_level(-1),
     _first_stamp(common::time_zero),
     _last_stamp(common::time_zero)
 {
-    //TODO: Check
-    _context = g_main_context_default();
-    _thread = std::thread(&GStreamerPublisher::_gst_run(), this);
+    _gst.logger = &_logger;
 }
 
+void GStreamerPublisher::_gst_thread_start() {
+    _gst_thread_stop();
 
-void GStreamerPublisher::_gst_run() {
-    //TODO: Check
-    _loop = g_main_loop_new(_context, true);
-    g_main_loop_run(_loop);
+    // _gst.loop = g_main_loop_new(nullptr, false);
+    _thread = std::thread(std::bind(&GStreamerPublisher::_gst_thread_run, this));
 }
 
-void GStreamerPublisher::_gst_stop() {
-  if (_thread.joinable()) {
-    //TODO: Check
-    g_main_loop_quit(_loop);
-    _thread.join();
-  }
+void GStreamerPublisher::_gst_thread_run() {
+    RCLCPP_INFO(_logger, "Stream receiver started.");
+
+    while(_gst.sink && !gst_app_sink_is_eos(_gst.sink)) {
+        //Pull sample back out of pipeline
+        GstSample * sample = gst_app_sink_pull_sample(_gst.sink);
+        if(sample) {
+            if(!_receive_sample(sample)) {
+                RCLCPP_ERROR(_logger, "Invalid sample received from stream.");
+            }
+
+            gst_sample_unref(sample);
+        } else {
+            RCLCPP_ERROR(_logger, "Could not get gstreamer sample.");
+
+            if(gst_app_sink_is_eos(_gst.sink)) {
+                RCLCPP_ERROR(_logger, "End-of-stream is in place!");
+                break;
+            }
+        }
+
+            // if(common::get_pipeline_state(_gst_pipeline, 10ms) != GST_STATE_READY)
+            //     RCLCPP_ERROR(_logger, "Stream is not ready!");
+
+            // return;
+    }
+}
+
+void GStreamerPublisher::_gst_thread_stop() {
+    if (_thread.joinable()) {
+        gst_app_src_end_of_stream(_gst.source);
+        _thread.join();
+    }
 }
 
 GStreamerPublisher::~GStreamerPublisher() {
     //TODO: Check
+    // _gst_thread_stop();
     _gst_clean_up();
-    _gst_stop();
+    _pub.reset();
 }
 
 void GStreamerPublisher::shutdown() {
@@ -100,31 +124,44 @@ void GStreamerPublisher::reset() {
     _last_stamp = common::time_zero;
 
     //If we have a pipeline already, clean up and start over
-    if(_gst_pipeline) {
-        RCLCPP_INFO(_logger, "Cleaning previous pipeline...");
-        gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_NULL);
+    if(_gst.pipeline) {
+        RCLCPP_INFO(_logger, "Cleaning pipeline...");
+        gst_element_set_state(GST_ELEMENT(_gst.pipeline), GST_STATE_NULL);
         _gst_clean_up();
     }
 }
 
 void GStreamerPublisher::start() {
-    if(!common::gst_configure(_logger, _pipeline_internal, &_gst_pipeline, &_gst_src, &_gst_sink, _queue_size, _force_debug_level)) {
+    _has_shutdown = false;
+
+    //Init GST and configure debug level as requested
+    common::gst_do_init(_logger);
+    common::gst_set_debug_level(_force_debug_level);
+
+    if(!common::gst_configure(_logger, _pipeline_internal, _gst)) {
         _gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
         throw std::runtime_error(msg);
     }
 
-    const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_PLAYING);
-    if(set_ret == GST_STATE_CHANGE_ASYNC) {
-        RCLCPP_WARN(_logger, "Waiting for system stream to ready...");
-    } else if(set_ret != GST_STATE_CHANGE_SUCCESS) {
+    gst_app_src_set_max_buffers(_gst.source, _queue_size);
+    gst_app_sink_set_max_buffers(_gst.sink, _queue_size);
+    // gst_app_src_set_max_bytes(_gst.source, 10000000); //TODO
+    common::configure_pipeline_callbacks(_gst);
+
+    const auto set_ret = gst_element_set_state(GST_ELEMENT(_gst.pipeline), GST_STATE_PLAYING);
+    if(set_ret == GST_STATE_CHANGE_SUCCESS) {
+        RCLCPP_INFO(_logger, "Started stream!");
+    } else if(set_ret == GST_STATE_CHANGE_ASYNC) {
+        RCLCPP_INFO(_logger, "Waiting for stream to start...");
+    } else {
         const auto msg = "Could not set pipeline to playing!";
         RCLCPP_ERROR(_logger, msg);
         throw std::runtime_error(msg);
-    } else {
-        RCLCPP_INFO(_logger, "Started stream!");
     }
+
+    _gst_thread_start();
 }
 
 
@@ -132,26 +169,28 @@ void GStreamerPublisher::_gst_clean_up() {
     if(_has_shutdown)
         return;
 
-    // RCLCPP_INFO(_logger, "Shutting down...");
+    RCLCPP_WARN(_logger, "Shutting down...");
 
-    if(_gst_pipeline) {
-        gst_element_set_state(GST_ELEMENT(_gst_pipeline), GST_STATE_NULL);
-        gst_object_unref(_gst_pipeline);
-        _gst_pipeline = nullptr;
+    _gst_thread_stop();
+
+    if(_gst.pipeline) {
+        gst_element_set_state(GST_ELEMENT(_gst.pipeline), GST_STATE_NULL);
+        gst_object_unref(_gst.pipeline);
+        _gst.pipeline = nullptr;
 
         //XXX: Pipeline will clear up all other references as well
-        if(_gst_src != nullptr) _gst_src = nullptr;
-        if(_gst_sink != nullptr) _gst_sink = nullptr;
+        if(_gst.source != nullptr) _gst.source = nullptr;
+        if(_gst.sink != nullptr) _gst.sink = nullptr;
     }
 
-    if(_gst_src != nullptr) {
-        gst_object_unref(_gst_src);
-        _gst_src = nullptr;
+    if(_gst.source != nullptr) {
+        gst_object_unref(_gst.source);
+        _gst.source = nullptr;
     }
 
-    if(_gst_sink != nullptr) {
-        gst_object_unref(_gst_sink);
-        _gst_sink = nullptr;
+    if(_gst.sink != nullptr) {
+        gst_object_unref(_gst.sink);
+        _gst.sink = nullptr;
     }
 
     // RCLCPP_INFO(_logger, "Deinit GST...");
@@ -162,8 +201,8 @@ void GStreamerPublisher::_gst_clean_up() {
 }
 
 //TODO: Keyframes on some regular basis or when subscribers join
-// if(GST_IS_ELEMENT(_gst_src)) {
-//     const auto sink_pad = gst_element_get_static_pad(GST_ELEMENT(_gst_src), "sink_0");
+// if(GST_IS_ELEMENT(_gst.source)) {
+//     const auto sink_pad = gst_element_get_static_pad(GST_ELEMENT(_gst.source), "sink_0");
 //      send_keyframe(sink_pad, ...);
 // } else {
 //     RCLCPP_WARN(_logger, "Keyframe request ignored, pipeline not ready");
@@ -196,7 +235,7 @@ void GStreamerPublisher::advertiseImpl(rclcpp::Node* nh, const std::string& base
 
     RCLCPP_INFO_STREAM(_logger, "Encoder hint: \"" << _encoder_hint << "\"");
 
-    const std::string transport_topic = _get_topic(base_topic);
+    const std::string transport_topic = common::get_topic(base_topic, getTransportName());
     const auto qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(custom_qos), custom_qos);
     _pub = _node->create_publisher<TransportType>(transport_topic, qos);
 
@@ -205,6 +244,11 @@ void GStreamerPublisher::advertiseImpl(rclcpp::Node* nh, const std::string& base
 
 void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const {
     if(!_pub || (getNumSubscribers() <= 0)) {
+        return;
+    }
+
+    if(!_gst.feed_open) {
+        RCLCPP_WARN_STREAM(_logger, "Pipeline not accepting data, frame dropped");
         return;
     }
 
@@ -277,50 +321,66 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
     // gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
     // gst_segment_position_from_running_time(segment_in, GstFormat::GST_FORMAT_TIME, g_stamp);
 
-    // RCLCPP_INFO(_logger, "SAMPLE");
-    const auto sample_in = gst_sample_new(buffer_in, caps_in, nullptr, nullptr);
+    auto info = common::get_info(message.header);
 
-    // RCLCPP_INFO(_logger, "PUSH");
-    const auto push_result = gst_app_src_push_sample(_gst_src, sample_in);
-    //XXX: Sample owns buffer, no need to unref
+    // RCLCPP_INFO(_logger, "SAMPLE");
+    const auto sample_in = gst_sample_new(buffer_in, caps_in, nullptr, info);
+
+    GstFlowReturn ret;
+    g_signal_emit_by_name(_gst.source, "push-sample", sample_in, &ret);
     gst_sample_unref(sample_in);
 
-    if(push_result != GST_FLOW_OK) {
+    if (ret != GST_FLOW_OK) {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
-        return;
     }
+}
 
-    //Pull sample back out of pipeline
-    GstSample * sample_out = gst_app_sink_try_pull_sample(_gst_sink, GST_SECOND);
-    if (!sample_out) {
-        RCLCPP_ERROR(_logger, "Could not get gstreamer sample.");
-        if(gst_app_sink_is_eos(_gst_sink))
-            RCLCPP_ERROR(_logger, "End-of-stream is in place!");
-
-        if(common::get_pipeline_state(_gst_pipeline, 10ms) != GST_STATE_READY)
-            RCLCPP_ERROR(_logger, "Stream is not ready!");
-
-        return;
+bool GStreamerPublisher::_receive_sample(GstSample* sample) {
+    const auto buffer = gst_sample_get_buffer(sample);
+    // const auto memory = gst_buffer_get_memory(buffer, 0);
+    // GstMapInfo mem_info;
+    // if(!gst_memory_map(memory, &mem_info, GST_MAP_READ)) {
+    //     RCLCPP_ERROR(_logger, "Cannot read sample data!");
+    //     return false;
+    // }
+    // const auto data = std::span(mem_info.data, mem_info.size);
+    GstMapInfo map;
+    if (!buffer || !gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        RCLCPP_ERROR(_logger, "Cannot read sample data!");
+        return false;
     }
+    const auto data = std::span(map.data, map.size);
+    // RCLCPP_ERROR_STREAM(_logger, "DATA: " << data.size());
+    // RCLCPP_ERROR_STREAM(_logger, "START: " << static_cast<void*>(map.data));
+    // RCLCPP_ERROR_STREAM(_logger, "START2: " << static_cast<void*>(data.data()));
+    // RCLCPP_ERROR_STREAM(_logger, "D: " << (int)map.data[0]);
+    const auto caps = gst_sample_get_caps(sample);
+    const auto info = gst_sample_get_info(sample);
 
-    const auto buffer_out = gst_sample_get_buffer(sample_out);
-    const auto memory_out = gst_buffer_get_memory(buffer_out, 0);
-    GstMapInfo info;
-    gst_memory_map(memory_out, &info, GST_MAP_READ);
-    const auto data_out = std::span(info.data, info.size);
-    const auto caps_out = gst_sample_get_caps(sample_out);
-    const auto info_out = gst_sample_get_info(sample_out);
+    int64_t nanos = 0;
+    std::string frame_id;
+
+    if((!info) || (std::strcmp(gst_structure_get_name(info), encoding::sample_info_name) != 0)) {
+        RCLCPP_WARN(_logger, "Lost frame data for sample");
+    } else {
+        frame_id = std::string(gst_structure_get_string(GST_STRUCTURE(info), encoding::sample_info_frame_id));
+        if(!gst_structure_get_int64(GST_STRUCTURE(info), encoding::sample_info_frame_id, &nanos)){
+            nanos = 0;
+        }
+    }
 
     gstreamer_image_transport::msg::DataPacket packet;
-    packet.header = message.header;
+    packet.header.frame_id = frame_id;
+    packet.header.stamp = rclcpp::Time(nanos, RCL_ROS_TIME);
     packet.encoder = _encoder_hint;
-    packet.caps = caps_out ? gst_caps_to_string(caps_out) : "";
-    packet.extra = info_out ? gst_structure_to_string(info_out) : "";
-    packet.data.assign(data_out.begin(), data_out.end());
+    packet.caps = caps ? gst_caps_to_string(caps) : "";
+    // packet.extra = info_out ? gst_structure_to_string(info_out) : "";
+    packet.data.assign(data.begin(), data.end());
+
+    gst_buffer_unmap (buffer, &map);
 
     _pub->publish(packet);
 
-    gst_sample_unref(sample_out);
+    return true;
 }
-
 };

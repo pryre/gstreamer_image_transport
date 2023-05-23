@@ -52,16 +52,13 @@ protected:
 
 private:
     void _gst_clean_up();
-    void _gst_run();
-    void _gst_stop();
+    void _gst_thread_start();
+    void _gst_thread_run();
+    void _gst_thread_stop();
 
-    inline std::string _get_topic(const std::string & base_topic) const { return base_topic + "/" + getTransportName(); }
+    bool _receive_sample(GstSample* sample);
 
 private:
-    std::thread _thread;
-    GMainContext* _context;
-    GMainLoop* _loop;
-
     rclcpp::Node* _node;
     rclcpp::Logger _logger;
     rclcpp::Publisher<TransportType>::SharedPtr _pub;
@@ -74,9 +71,8 @@ private:
     std::string _encoder_hint;
 
     // Gstreamer structures
-    GstPipeline *_gst_pipeline;
-    GstAppSrc *_gst_src;
-    GstAppSink *_gst_sink;
+    std::thread _thread;
+    gstreamer_context_data _gst;
 
     mutable std::mutex _mutex;
     mutable rclcpp::Time _first_stamp;
