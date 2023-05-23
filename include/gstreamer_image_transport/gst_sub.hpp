@@ -38,6 +38,7 @@ private:
 
     void _gst_clean_up();
     void _gst_thread_start();
+    void _gst_thread_run();
     void _gst_thread_stop();
 
     void _cb_packet(const typename gstreamer_image_transport::msg::DataPacket::ConstSharedPtr& message);
@@ -45,6 +46,7 @@ private:
 
 private:
     bool _has_shutdown;
+    rclcpp::Node* _node;
     rclcpp::Logger _logger;
     rclcpp::Subscription<TransportType>::SharedPtr _sub;
     Callback _image_callback;

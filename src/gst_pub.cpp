@@ -64,6 +64,13 @@ GStreamerPublisher::GStreamerPublisher() :
     _gst.logger = &_logger;
 }
 
+GStreamerPublisher::~GStreamerPublisher() {
+    //TODO: Check
+    // _gst_thread_stop();
+    _gst_clean_up();
+    _pub.reset();
+}
+
 void GStreamerPublisher::_gst_thread_start() {
     _gst_thread_stop();
 
@@ -74,21 +81,38 @@ void GStreamerPublisher::_gst_thread_start() {
 void GStreamerPublisher::_gst_thread_run() {
     RCLCPP_INFO(_logger, "Stream receiver started.");
 
+    bool has_preroll = false;
     while(_gst.sink && !gst_app_sink_is_eos(_gst.sink)) {
+        // if(!has_preroll) {
+        //     GstSample * preroll = gst_app_sink_pull_preroll(_gst.sink);
+        //     if(preroll) {
+        //         has_preroll = true;
+        //         gst_sample_unref(preroll);
+        //     }
+
+        //     continue;
+        // }
+
         //Pull sample back out of pipeline
         GstSample * sample = gst_app_sink_pull_sample(_gst.sink);
         if(sample) {
-            if(!_receive_sample(sample)) {
-                RCLCPP_ERROR(_logger, "Invalid sample received from stream.");
+            if(has_preroll) {
+                if(!_receive_sample(sample)) {
+                    RCLCPP_ERROR(_logger, "Invalid sample received from stream.");
+                }
+            } else {
+                RCLCPP_INFO(_logger, "Got encoder preroll");
+                has_preroll = true;
             }
 
             gst_sample_unref(sample);
         } else {
-            RCLCPP_ERROR(_logger, "Could not get gstreamer sample.");
-
             if(gst_app_sink_is_eos(_gst.sink)) {
-                RCLCPP_ERROR(_logger, "End-of-stream is in place!");
+                has_preroll = false;
+                // RCLCPP_ERROR(_logger, "End-of-stream is in place!");
                 break;
+            } else {
+                RCLCPP_ERROR(_logger, "Could not get gstreamer sample.");
             }
         }
 
@@ -106,18 +130,10 @@ void GStreamerPublisher::_gst_thread_stop() {
     }
 }
 
-GStreamerPublisher::~GStreamerPublisher() {
-    //TODO: Check
-    // _gst_thread_stop();
-    _gst_clean_up();
-    _pub.reset();
-}
-
 void GStreamerPublisher::shutdown() {
     reset();
     _pub.reset();
 }
-
 
 void GStreamerPublisher::reset() {
     _first_stamp = common::time_zero;
@@ -169,7 +185,7 @@ void GStreamerPublisher::_gst_clean_up() {
     if(_has_shutdown)
         return;
 
-    RCLCPP_WARN(_logger, "Shutting down...");
+    _has_shutdown = true;
 
     _gst_thread_stop();
 
@@ -196,8 +212,6 @@ void GStreamerPublisher::_gst_clean_up() {
     // RCLCPP_INFO(_logger, "Deinit GST...");
     // gst_deinit();
     // RCLCPP_INFO(_logger, "Done!");
-
-    _has_shutdown = true;
 }
 
 //TODO: Keyframes on some regular basis or when subscribers join
@@ -252,8 +266,8 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
         return;
     }
 
-    auto caps_in = common::get_caps(message);
-    if(!GST_IS_CAPS(caps_in)) {
+    auto caps = common::get_caps(message);
+    if(!GST_IS_CAPS(caps)) {
         RCLCPP_ERROR_STREAM(_logger,
             "Unable to reconfigure to format: " << message.encoding <<
             "(" << message.width << "x" << message.height << ")"
@@ -264,6 +278,7 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
 
     //XXX: At this point we should have a supported stream (assuming pipeline is happy with it)
     const auto frame_stamp = rclcpp::Time(message.header.stamp);
+    const auto frame_mark = frame_stamp - common::time_zero;
 
     //Perform all of our time calculations in lock
     _mutex.lock();
@@ -291,12 +306,11 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
         return;
     }
 
-
     // RCLCPP_INFO_STREAM(_logger, "Frame delta: " << frame_delta.to_chrono<std::chrono::milliseconds>());
     //XXX: At this point we should be confident that the stream is monotonic and we have a valid stamp
 
     const size_t data_size = message.data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
-    auto mem_in = gst_memory_new_wrapped(
+    auto mem = gst_memory_new_wrapped(
         GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
         (gpointer)message.data.data(),
         data_size, 0, data_size,
@@ -304,27 +318,30 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
     );
 
     // RCLCPP_INFO(_logger, "BUFFER");
-    GstBuffer* buffer_in = gst_buffer_new();
-    gst_buffer_append_memory(buffer_in, mem_in);
+    GstBuffer* buffer = gst_buffer_new();
+    gst_buffer_append_memory(buffer, mem);
     //XXX: Use the stream delta to calculate our buffer timings
-    const auto g_stamp = common::ros_time_to_gst(stream_delta);
+    const auto g_stream_stamp = common::ros_time_to_gst(stream_delta);
+    const auto g_frame_stamp = common::ros_time_to_gst(frame_mark);
     const auto g_delta = common::ros_time_to_gst(frame_delta);
 
-    // RCLCPP_INFO(_logger, "BUFFER_TIME");
-    GST_BUFFER_PTS(buffer_in) = g_stamp;
-    GST_BUFFER_DTS(buffer_in) = g_stamp;
-    GST_BUFFER_OFFSET(buffer_in) = g_stamp;
-    GST_BUFFER_DURATION(buffer_in) = g_delta;
+    // RCLCPP_INFO_STREAM(_logger, "BUFFER_TIME: " << g_stream_stamp);
+    // RCLCPP_INFO_STREAM(_logger, "ROS_TIME: " << g_frame_stamp);
+    GST_BUFFER_PTS(buffer) = g_stream_stamp;
+    GST_BUFFER_DTS(buffer) = g_stream_stamp;
+    GST_BUFFER_OFFSET(buffer) = g_stream_stamp;
+    GST_BUFFER_DURATION(buffer) = g_delta;
 
-    // gst_buffer_add_reference_timestamp_meta(buffer_in, caps_in, g_stamp, GST_CLOCK_TIME_NONE);
+    gst_buffer_add_reference_timestamp_meta(buffer, encoding::info_reference, g_frame_stamp, GST_CLOCK_TIME_NONE);
     // auto segment_in = gst_segment_new();
     // gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
     // gst_segment_position_from_running_time(segment_in, GstFormat::GST_FORMAT_TIME, g_stamp);
 
-    auto info = common::get_info(message.header);
+    // auto info = common::get_info(message.header);
 
     // RCLCPP_INFO(_logger, "SAMPLE");
-    const auto sample_in = gst_sample_new(buffer_in, caps_in, nullptr, info);
+    const auto sample_in = gst_sample_new(buffer, caps, nullptr, nullptr);
+    // gst_object_unref(info);
 
     GstFlowReturn ret;
     g_signal_emit_by_name(_gst.source, "push-sample", sample_in, &ret);
@@ -336,49 +353,33 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
 }
 
 bool GStreamerPublisher::_receive_sample(GstSample* sample) {
-    const auto buffer = gst_sample_get_buffer(sample);
-    // const auto memory = gst_buffer_get_memory(buffer, 0);
-    // GstMapInfo mem_info;
-    // if(!gst_memory_map(memory, &mem_info, GST_MAP_READ)) {
-    //     RCLCPP_ERROR(_logger, "Cannot read sample data!");
-    //     return false;
-    // }
-    // const auto data = std::span(mem_info.data, mem_info.size);
+    gstreamer_image_transport::msg::DataPacket packet;
+    //We stamp the packet with the current time, and we'll extract the image time from the encoded data
+    //There is no guarantee that this packet is one image, a piece of an image, or something else
+    packet.header.stamp = _node->get_clock()->now();
+
+    RCLCPP_ERROR(_logger, "PACK1");
+    //Get packet data
+    const auto caps = gst_sample_get_caps(sample);
+    packet.header.frame_id = common::frame_id_from_caps(caps);  //TODO: Work this out
+    packet.caps = caps ? gst_caps_to_string(caps) : "";
+    packet.encoder = _encoder_hint;
+    // packet.extra = info_out ? gst_structure_to_string(info_out) : "";
+
+    RCLCPP_ERROR(_logger, "PACK2");
+    //Get data
     GstMapInfo map;
+    const auto buffer = gst_sample_get_buffer(sample);
     if (!buffer || !gst_buffer_map(buffer, &map, GST_MAP_READ)) {
         RCLCPP_ERROR(_logger, "Cannot read sample data!");
         return false;
     }
+    RCLCPP_ERROR(_logger, "PACK3");
     const auto data = std::span(map.data, map.size);
-    // RCLCPP_ERROR_STREAM(_logger, "DATA: " << data.size());
-    // RCLCPP_ERROR_STREAM(_logger, "START: " << static_cast<void*>(map.data));
-    // RCLCPP_ERROR_STREAM(_logger, "START2: " << static_cast<void*>(data.data()));
-    // RCLCPP_ERROR_STREAM(_logger, "D: " << (int)map.data[0]);
-    const auto caps = gst_sample_get_caps(sample);
-    const auto info = gst_sample_get_info(sample);
-
-    int64_t nanos = 0;
-    std::string frame_id;
-
-    if((!info) || (std::strcmp(gst_structure_get_name(info), encoding::sample_info_name) != 0)) {
-        RCLCPP_WARN(_logger, "Lost frame data for sample");
-    } else {
-        frame_id = std::string(gst_structure_get_string(GST_STRUCTURE(info), encoding::sample_info_frame_id));
-        if(!gst_structure_get_int64(GST_STRUCTURE(info), encoding::sample_info_frame_id, &nanos)){
-            nanos = 0;
-        }
-    }
-
-    gstreamer_image_transport::msg::DataPacket packet;
-    packet.header.frame_id = frame_id;
-    packet.header.stamp = rclcpp::Time(nanos, RCL_ROS_TIME);
-    packet.encoder = _encoder_hint;
-    packet.caps = caps ? gst_caps_to_string(caps) : "";
-    // packet.extra = info_out ? gst_structure_to_string(info_out) : "";
     packet.data.assign(data.begin(), data.end());
-
     gst_buffer_unmap (buffer, &map);
 
+    RCLCPP_ERROR(_logger, "PACK4");
     _pub->publish(packet);
 
     return true;

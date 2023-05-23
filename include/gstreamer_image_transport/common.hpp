@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <rcl/time.h>
 #include <rclcpp/context.hpp>
@@ -15,8 +16,10 @@
 
 
 #include <gst/gstpipeline.h>
+#include "gst/gstcaps.h"
 #include "gst/gstcapsfeatures.h"
 #include "gst/gstclock.h"
+#include "gst/gstmeta.h"
 #include "gst/gstpad.h"
 #include "gst/gststructure.h"
 #include "gst/app/gstappsink.h"
@@ -118,9 +121,13 @@ const std::unordered_map<std::string_view, std::string_view> ros_gst_image {{
     {"png", "image/png"},
 }};
 
-const auto sample_info_name = "ros-frame";
-const auto sample_info_frame_id = "id";
-const auto sample_info_stamp = "stamp";
+const auto caps_name = "name";
+
+const auto info_meta_name = "ros-frame";
+const auto info_meta_frame_id = "id";
+const auto info_meta_stamp = "stamp";
+
+const auto info_reference = gst_caps_from_string("timestamp/x-ros-camera-stream");
 
 };
 
@@ -318,6 +325,7 @@ inline GstCaps* get_caps(const sensor_msgs::msg::Image& image) {
             "width", G_TYPE_INT, image.width,
             "height", G_TYPE_INT, image.height,
             "framerate", GST_TYPE_FRACTION, 0, 1,   //TODO: Check?
+            encoding::caps_name, G_TYPE_STRING, image.header.frame_id.c_str(),
             nullptr
         );
     } else {
@@ -332,15 +340,32 @@ inline GstCaps* get_caps(const sensor_msgs::msg::Image& image) {
 
 inline GstStructure* get_info(std_msgs::msg::Header header) {
     return gst_structure_new(
-        encoding::sample_info_name,
-        encoding::sample_info_frame_id, G_TYPE_STRING, header.frame_id.c_str(),
-        encoding::sample_info_stamp, G_TYPE_INT64, rclcpp::Time(header.stamp).nanoseconds(),
+        encoding::info_meta_name,
+        encoding::info_meta_frame_id, G_TYPE_STRING, header.frame_id.c_str(),
+        encoding::info_meta_stamp, G_TYPE_INT64, rclcpp::Time(header.stamp).nanoseconds(),
         nullptr
     );
 }
 
+inline std::string frame_id_from_caps(const GstCaps* caps) {
+    const auto none = "";
+
+    if(!GST_IS_CAPS(caps)) return none;
+
+    const auto caps_s = gst_caps_get_structure(caps, 0);
+    if(!GST_IS_STRUCTURE(caps_s)) return none;
+
+    const auto frame_id = gst_structure_get_string(GST_STRUCTURE(caps_s), encoding::caps_name);
+    return frame_id ? frame_id : none;
+}
+
 inline void fill_image_details(const GstCaps* caps, sensor_msgs::msg::Image& image) {
     const auto s = gst_caps_get_structure(caps, 0);
+    if(!GST_IS_STRUCTURE(s)) return;
+
+    const auto frame_id = gst_structure_get_string(s, encoding::caps_name);
+    image.header.frame_id = frame_id ? frame_id : "";
+    image.is_bigendian = std::endian::native == std::endian::big;
 
     gint width, height;
     gboolean res;
