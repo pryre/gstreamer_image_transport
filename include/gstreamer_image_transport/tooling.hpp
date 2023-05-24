@@ -47,7 +47,7 @@ struct gstreamer_context_data {
     GstAppSrc *source = nullptr;
     GstAppSink *sink = nullptr;
     GstCaps *time_ref = nullptr;
-    GstCaps *buffer_ref = nullptr;
+    // GstCaps *buffer_ref = nullptr;
     std::atomic<bool> feed_open {false};
 
     //XXX: These should be set before use
@@ -216,7 +216,7 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
     // );
 
     context.time_ref = gst_caps_from_string(encoding::info_reference);
-    context.buffer_ref = gst_caps_from_string(encoding::buffer_reference);
+    // context.buffer_ref = gst_caps_from_string(encoding::buffer_reference);
 
     RCLCPP_INFO_STREAM(logger, "Initializing stream...");
 
@@ -256,10 +256,10 @@ inline void gst_unref(gstreamer_context_data& context) {
         context.time_ref = nullptr;
     }
 
-    if(context.buffer_ref != nullptr) {
-        gst_caps_unref(context.buffer_ref);
-        context.buffer_ref = nullptr;
-    }
+    // if(context.buffer_ref != nullptr) {
+    //     gst_caps_unref(context.buffer_ref);
+    //     context.buffer_ref = nullptr;
+    // }
 }
 
 //In a C++ world, these callbacks are (as defined above):

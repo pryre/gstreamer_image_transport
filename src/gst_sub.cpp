@@ -97,12 +97,33 @@ void GStreamerSubscriber::_gst_thread_run() {
             }
         }
 
+        //Clean our memory queue after each sample
+        //Other functions will do this at the end as well outside of this loop
+        _clean_mem_queue();
             // if(common::get_pipeline_state(_gst_pipeline, 10ms) != GST_STATE_READY)
             //     RCLCPP_ERROR(_logger, "Stream is not ready!");
 
             // return;
     }
+
     RCLCPP_INFO(_logger, "Stream receiver stopped.");
+}
+
+size_t GStreamerSubscriber::_clean_mem_queue() {
+    //Do some cleanup
+    // auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
+    _mutex.lock();
+    // const auto initial_size = _mem_queue.size();
+    //Skim through our packet memory buffer
+    //Idea is to drop all of the previous memory packets that are unused
+    _mem_queue.erase(std::remove_if(_mem_queue.begin(), _mem_queue.end(), SharedMemoryImagePointer::is_valid_reference), _mem_queue.end());
+
+    const auto end_size = _mem_queue.size();
+    _mutex.unlock();
+
+    // RCLCPP_INFO_STREAM(_logger, "Mem: "  << end_size << "; Rem: " << (initial_size - end_size));
+
+    return end_size;
 }
 
 void GStreamerSubscriber::_gst_thread_stop() {
@@ -194,6 +215,7 @@ void GStreamerSubscriber::_gst_clean_up() {
     _has_shutdown = true;
 
     _gst_thread_stop();
+    _clean_mem_queue();
 
     tooling::gst_unref(_gst);
     // RCLCPP_INFO(_logger, "Deinit GST...");
@@ -253,6 +275,7 @@ void GStreamerSubscriber::_cb_packet(const gstreamer_image_transport::msg::DataP
     );
     auto buffer = gst_buffer_new();
     gst_buffer_append_memory(buffer, mem);
+    // const auto mem_ref = gst_memory_ref(mem);
 
     //XXX: Memory by copy
     // GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
@@ -271,27 +294,26 @@ void GStreamerSubscriber::_cb_packet(const gstreamer_image_transport::msg::DataP
     // std::copy(message->data.begin(), message->data.end(), data.begin());
     // gst_buffer_unmap (buffer, &map);
 
-    const auto mem_stamp = common::ros_time_to_gst(message->header.stamp);
+    // const auto mem_stamp = common::ros_time_to_gst(message->header.stamp);
     gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, common::ros_time_to_gst(message->frame_stamp), GST_CLOCK_TIME_NONE);
-    gst_buffer_add_reference_timestamp_meta(buffer, _gst.buffer_ref, mem_stamp, GST_CLOCK_TIME_NONE);
+    // gst_buffer_add_reference_timestamp_meta(buffer, _gst.buffer_ref, mem_stamp, GST_CLOCK_TIME_NONE);
 
     const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
+    const auto ref = gst_buffer_ref(gst_sample_get_buffer(sample));
 
     GstFlowReturn ret;
     g_signal_emit_by_name(_gst.source, "push-sample", sample, &ret);
-    gst_sample_unref(sample);
 
     if (ret == GST_FLOW_OK) {
+        //Add the timestamp of our packet memory to our list
         _mutex.lock();
-        if (_mem_map.find(mem_stamp) != _mem_map.end()) {
-            RCLCPP_FATAL(_logger, "Duplicate frame detected, dropping previous!");
-        }
-
-        _mem_map[mem_stamp] = message;
+        _mem_queue.emplace_back(ref, message);
         _mutex.unlock();
     } else {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
+
+    gst_sample_unref(sample);
 }
 
 bool GStreamerSubscriber::_receive_sample(GstSample* sample) {
@@ -316,18 +338,6 @@ bool GStreamerSubscriber::_receive_sample(GstSample* sample) {
     //Attempt to get image data, or stamp it now if it doesn't exist
     auto frame_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.time_ref);
     image->header.stamp = frame_ref ? rclcpp::Time(frame_ref->timestamp, RCL_ROS_TIME) : _node->get_clock()->now();
-
-    auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
-    if(buffer_ref) {
-        _mutex.lock();
-        const auto it = _mem_map.find(buffer_ref->timestamp);
-        if (it != _mem_map.end()) {
-            _mem_map.erase(it);
-        }
-        _mutex.unlock();
-    } else {
-        RCLCPP_FATAL(_logger, "No buffer reference found, potential memory leak!");
-    }
 
     _image_callback(image);
 

@@ -9,7 +9,7 @@
 #include "image_transport/simple_subscriber_plugin.hpp"
 #include "gstreamer_image_transport/msg/data_packet.hpp"
 
-#include <map>
+#include <deque>
 
 namespace gstreamer_image_transport
 {
@@ -17,6 +17,24 @@ namespace gstreamer_image_transport
 class GStreamerSubscriber : public image_transport::SubscriberPlugin {
 
 using TransportType = gstreamer_image_transport::msg::DataPacket;
+
+struct SharedMemoryImagePointer {
+    GstBuffer* buf;
+    TransportType::ConstSharedPtr img;
+
+    // StampedImagePointer(GstBuffer* buffer, TransportType::ConstSharedPtr img_ptr) :
+    // ref(gst_buffer_ref(buffer)),
+    // img(img_ptr) {}
+
+    ~SharedMemoryImagePointer() {
+        if( GST_OBJECT_REFCOUNT_VALUE(buf) >= 1)
+            gst_buffer_unref(buf);
+    }
+
+    static bool is_valid_reference(const SharedMemoryImagePointer& ptr) {
+        return GST_OBJECT_REFCOUNT_VALUE(ptr.buf);
+    }
+};
 
 public:
     GStreamerSubscriber();
@@ -46,6 +64,7 @@ private:
 
     void _cb_packet(const typename gstreamer_image_transport::msg::DataPacket::ConstSharedPtr& message);
     bool _receive_sample(GstSample* sample);
+    size_t _clean_mem_queue();
 
 private:
     bool _has_shutdown;
@@ -68,7 +87,7 @@ private:
 
     rclcpp::Time _last_stamp;
     mutable std::mutex _mutex;
-    std::map<GstClockTime, TransportType::ConstSharedPtr> _mem_map;
+    std::deque<SharedMemoryImagePointer> _mem_queue;
 };
 
 };
