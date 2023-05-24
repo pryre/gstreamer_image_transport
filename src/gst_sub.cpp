@@ -40,7 +40,7 @@ GStreamerSubscriber::GStreamerSubscriber() :
     _pipeline_internal("decodebin"),
     _queue_size(10),
     _force_debug_level(-1),
-    _last_stamp(common::time_zero)
+    _last_stamp(common::ros_time_zero)
 {
     _gst.logger = &_logger;
 }
@@ -102,6 +102,7 @@ void GStreamerSubscriber::_gst_thread_run() {
 
             // return;
     }
+    RCLCPP_INFO(_logger, "Stream receiver stopped.");
 }
 
 void GStreamerSubscriber::_gst_thread_stop() {
@@ -144,7 +145,7 @@ void GStreamerSubscriber::subscribeImpl(rclcpp::Node * node, const std::string &
 }
 
 void GStreamerSubscriber::reset() {
-    _last_stamp = common::time_zero;
+    _last_stamp = common::ros_time_zero;
 
     //If we have a pipeline already, clean up and start over
     if(_gst.pipeline) {
@@ -221,6 +222,7 @@ void GStreamerSubscriber::_gst_clean_up() {
 
 void GStreamerSubscriber::_cb_packet(
   const gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & message) {
+
     const auto frame_stamp = rclcpp::Time(message->header.stamp);
     const auto frame_delta = frame_stamp - _last_stamp;
     //TODO: Check that ROS time has been reset, and if so, reset stream
@@ -260,20 +262,37 @@ void GStreamerSubscriber::_cb_packet(
     auto caps = gst_caps_from_string(message->caps.c_str());
     if(!GST_IS_CAPS(caps) || message->caps.empty()) {
         RCLCPP_ERROR_STREAM(_logger, "Unable to parse caps: " << message->caps);
-
         return;
     }
 
     const size_t data_size = message->data.size()*sizeof(gstreamer_image_transport::msg::DataPacket::_data_type::value_type);
-    auto mem = gst_memory_new_wrapped(
-        GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
-        (gpointer)message->data.data(),
-        data_size, 0, data_size,
-        nullptr, nullptr
-    );
+    // auto mem = gst_memory_new_wrapped(
+    //     GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
+    //     (gpointer)message->data.data(),
+    //     data_size, 0, data_size,
+    //     nullptr, nullptr
+    // );
 
-    GstBuffer* buffer = gst_buffer_new();
-    gst_buffer_append_memory(buffer, mem);
+    GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
+    GstMapInfo map;
+    if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
+        RCLCPP_ERROR(_logger, "Could allocate buffer");
+        gst_buffer_unref(buffer);
+        return;
+    }
+    const auto data = std::span(map.data, map.size);
+    if(data.size() != data_size) {
+        RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
+        gst_buffer_unref(buffer);
+        return;
+    }
+    std::copy(message->data.begin(), message->data.end(), data.begin());
+    gst_buffer_unmap (buffer, &map);
+
+    if(!GST_IS_CAPS(encoding::info_reference)) RCLCPP_ERROR(_logger, "NO CAP");
+    gst_buffer_add_reference_timestamp_meta(buffer, encoding::info_reference, common::ros_time_to_gst(message->frame_stamp), GST_CLOCK_TIME_NONE);
+
+    // gst_buffer_append_memory(buffer, mem);
     // const timespec ts {message->header.stamp.sec, message->header.stamp.nanosec};
     // const auto g_stamp = GST_TIMESPEC_TO_TIME(ts);
     // gst_buffer_add_reference_timestamp_meta(buffer, caps, g_stamp, GST_CLOCK_TIME_NONE);
@@ -284,11 +303,11 @@ void GStreamerSubscriber::_cb_packet(
     // auto info_in = msg->extra.empty() ? nullptr : gst_structure_from_string(msg->extra.c_str(), NULL);
     // auto info = common::get_info(message->header);
 
-    const auto sample_in = gst_sample_new(buffer, caps, nullptr, nullptr);
+    const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
 
     GstFlowReturn ret;
-    g_signal_emit_by_name(_gst.source, "push-sample", sample_in, &ret);
-    gst_sample_unref(sample_in);
+    g_signal_emit_by_name(_gst.source, "push-sample", sample, &ret);
+    gst_sample_unref(sample);
 
     if (ret != GST_FLOW_OK) {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
@@ -302,21 +321,21 @@ bool GStreamerSubscriber::_receive_sample(GstSample* sample) {
     //Everything except stamp and data
     common::fill_image_details(caps, *image);
 
+    const auto buffer = gst_sample_get_buffer(sample);
+
     //Get data
     GstMapInfo map;
-    const auto buffer = gst_sample_get_buffer(sample);
     if (!buffer || !gst_buffer_map(buffer, &map, GST_MAP_READ)) {
         RCLCPP_ERROR(_logger, "Cannot read sample data!");
         return false;
     }
+    const auto data = std::span(map.data, map.size);
+    image->data.assign(data.begin(), data.end());
+    gst_buffer_unmap (buffer, &map);
 
     //Attempt to get image data, or stamp it now if it doesn't exist
     auto ref = gst_buffer_get_reference_timestamp_meta(buffer, encoding::info_reference);
     image->header.stamp = ref ? rclcpp::Time(ref->timestamp, RCL_ROS_TIME) : _node->get_clock()->now();
-
-    const auto data = std::span(map.data, map.size);
-    image->data.assign(data.begin(), data.end());
-    gst_buffer_unmap (buffer, &map);
 
     _image_callback(image);
 

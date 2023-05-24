@@ -38,7 +38,7 @@ namespace gstreamer_image_transport
 namespace common {
 
 const auto duration_zero = rclcpp::Duration(0, 0);
-const auto time_zero = rclcpp::Time(0, 0, RCL_ROS_TIME);
+const auto ros_time_zero = rclcpp::Time(0, 0, RCL_ROS_TIME);
 
 constexpr std::string appsrc_name = "source";
 constexpr std::string appsink_name = "sink";
@@ -51,6 +51,10 @@ inline std::string get_topic(const std::string& base_topic, const std::string& t
 }
 
 inline GstClockTime ros_time_to_gst(const rclcpp::Duration& t) {
+    return GST_NSECOND*t.nanoseconds();
+}
+
+inline GstClockTime ros_time_to_gst(const rclcpp::Time& t) {
     return GST_NSECOND*t.nanoseconds();
 }
 

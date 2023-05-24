@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <mutex>
 #include <rclcpp/clock.hpp>
+#include <rclcpp/duration.hpp>
 #include <rclcpp/publisher.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <string>
@@ -77,6 +78,8 @@ private:
     mutable std::mutex _mutex;
     mutable rclcpp::Time _first_stamp;
     mutable rclcpp::Time _last_stamp;
+    mutable rclcpp::Time _last_key;
+    mutable rclcpp::Duration _keyframe_interval;
 };
 
 };

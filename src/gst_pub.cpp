@@ -46,6 +46,7 @@
 #include "gst/gstsegment.h"
 #include "gst/gststructure.h"
 #include "gstreamer_image_transport/msg/data_packet.hpp"
+#include "gstreamer_image_transport/tooling.hpp"
 #include "rclcpp/logging.hpp"
 #include "gstreamer_image_transport/common.hpp"
 
@@ -58,8 +59,10 @@ GStreamerPublisher::GStreamerPublisher() :
     _logger(rclcpp::get_logger(getModuleName())),
     _queue_size(10),
     _force_debug_level(-1),
-    _first_stamp(common::time_zero),
-    _last_stamp(common::time_zero)
+    _first_stamp(common::ros_time_zero),
+    _last_stamp(common::ros_time_zero),
+    _last_key(common::ros_time_zero),
+    _keyframe_interval(2s)
 {
     _gst.logger = &_logger;
 }
@@ -136,8 +139,8 @@ void GStreamerPublisher::shutdown() {
 }
 
 void GStreamerPublisher::reset() {
-    _first_stamp = common::time_zero;
-    _last_stamp = common::time_zero;
+    _first_stamp = common::ros_time_zero;
+    _last_stamp = common::ros_time_zero;
 
     //If we have a pipeline already, clean up and start over
     if(_gst.pipeline) {
@@ -242,6 +245,13 @@ void GStreamerPublisher::advertiseImpl(rclcpp::Node* nh, const std::string& base
     force_gst_debug_desc.description = "Forces GST to output debug data messages at specified level";
     _force_debug_level = _node->declare_parameter(param_prefix + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
 
+    auto keyframe_interval_desc = rcl_interfaces::msg::ParameterDescriptor{};
+    keyframe_interval_desc.description = "Forces GST to output a keyframe at this interval in seconds";
+    double seconds = _keyframe_interval.seconds();
+    seconds = _node->declare_parameter(param_prefix + "keyframe_interval", seconds, keyframe_interval_desc);
+    _keyframe_interval = rclcpp::Duration(seconds*1s);
+
+
     //Get the last step in the encoder
     const auto int_split = _pipeline_internal.rfind(common::pipeline_split);
     _encoder_hint = _pipeline_internal.substr(int_split == std::string::npos ? 0 : (int_split < (_pipeline_internal.size() - 1)) ? int_split + 1 : int_split);
@@ -278,11 +288,11 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
 
     //XXX: At this point we should have a supported stream (assuming pipeline is happy with it)
     const auto frame_stamp = rclcpp::Time(message.header.stamp);
-    const auto frame_mark = frame_stamp - common::time_zero;
+    const auto frame_mark = frame_stamp - common::ros_time_zero;
 
     //Perform all of our time calculations in lock
     _mutex.lock();
-    if(_first_stamp == common::time_zero) {
+    if(_first_stamp == common::ros_time_zero) {
         _first_stamp = frame_stamp;
     }
     const auto stream_delta = frame_stamp - _first_stamp;
@@ -290,6 +300,8 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
     //Do check logic here to avoid mismatch errors
     const bool stream_delta_ok = stream_delta >= common::duration_zero;
     const bool frame_delta_ok = frame_delta >= common::duration_zero;
+    const bool send_keyframe = _last_key - frame_stamp > _keyframe_interval;
+    if(send_keyframe) _last_key = frame_stamp;
     if(stream_delta_ok && frame_delta_ok) _last_stamp = frame_stamp;
     _mutex.unlock();
 
@@ -310,16 +322,32 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
     //XXX: At this point we should be confident that the stream is monotonic and we have a valid stamp
 
     const size_t data_size = message.data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
-    auto mem = gst_memory_new_wrapped(
-        GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
-        (gpointer)message.data.data(),
-        data_size, 0, data_size,
-        nullptr, nullptr
-    );
+    // auto mem = gst_memory_new_wrapped(
+    //     GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
+    //     (gpointer)message.data.data(),
+    //     data_size, 0, data_size,
+    //     nullptr, nullptr
+    // );
 
     // RCLCPP_INFO(_logger, "BUFFER");
-    GstBuffer* buffer = gst_buffer_new();
-    gst_buffer_append_memory(buffer, mem);
+    GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
+    // gst_buffer_append_memory(buffer, mem);
+
+    GstMapInfo map;
+    if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
+        RCLCPP_ERROR(_logger, "Could allocate buffer");
+        gst_buffer_unref(buffer);
+        return;
+    }
+    const auto data = std::span(map.data, map.size);
+    if(data.size() != data_size) {
+        RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
+        gst_buffer_unref(buffer);
+        return;
+    }
+    std::copy(message.data.begin(), message.data.end(), data.begin());
+    gst_buffer_unmap (buffer, &map);
+
     //XXX: Use the stream delta to calculate our buffer timings
     const auto g_stream_stamp = common::ros_time_to_gst(stream_delta);
     const auto g_frame_stamp = common::ros_time_to_gst(frame_mark);
@@ -347,6 +375,15 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
     g_signal_emit_by_name(_gst.source, "push-sample", sample_in, &ret);
     gst_sample_unref(sample_in);
 
+    if(send_keyframe) {
+        const auto pad = gst_element_get_static_pad(GST_ELEMENT(_gst.source), "sink");
+        if(pad) {
+            tooling::send_keyframe(pad, g_stream_stamp, g_stream_stamp, g_stream_stamp);
+        } else {
+            RCLCPP_ERROR(_logger, "Could not insert keyframe, pad not found");
+        }
+    }
+
     if (ret != GST_FLOW_OK) {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
@@ -363,7 +400,6 @@ bool GStreamerPublisher::_receive_sample(GstSample* sample) {
     packet.header.frame_id = common::frame_id_from_caps(caps);  //TODO: Work this out
     packet.caps = caps ? gst_caps_to_string(caps) : "";
     packet.encoder = _encoder_hint;
-    // packet.extra = info_out ? gst_structure_to_string(info_out) : "";
 
     //Get data
     GstMapInfo map;
@@ -375,6 +411,9 @@ bool GStreamerPublisher::_receive_sample(GstSample* sample) {
     const auto data = std::span(map.data, map.size);
     packet.data.assign(data.begin(), data.end());
     gst_buffer_unmap (buffer, &map);
+
+    const auto ref = gst_buffer_get_reference_timestamp_meta(buffer, encoding::info_reference);
+    packet.frame_stamp = ref ? rclcpp::Time(ref->timestamp, RCL_ROS_TIME) : common::ros_time_zero;
 
     _pub->publish(packet);
 

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "gst/gstcaps.h"
+#include <gst/gstcaps.h>
+#include <unordered_map>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 
