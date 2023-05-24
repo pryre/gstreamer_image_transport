@@ -46,6 +46,8 @@ struct gstreamer_context_data {
     GstPipeline *pipeline = nullptr;
     GstAppSrc *source = nullptr;
     GstAppSink *sink = nullptr;
+    GstCaps *time_ref = nullptr;
+    GstCaps *buffer_ref = nullptr;
     std::atomic<bool> feed_open {false};
 
     //XXX: These should be set before use
@@ -112,7 +114,8 @@ inline std::string get_appsrc_str(const std::string_view name = common::appsrc_n
 }
 
 inline std::string get_appsink_str(const std::string_view name = common::appsink_name) {
-    return std::string("queue").append(common::pipeline_split_spaced).append("appsink name=").append(name);
+    // return std::string("queue").append(common::pipeline_split_spaced).append("appsink name=").append(name);
+    return std::string("appsink name=").append(name);
 }
 
 inline GstState get_pipeline_state(GstPipeline* pipeline, std::chrono::system_clock::duration timeout = std::chrono::system_clock::duration::zero()) {
@@ -212,6 +215,9 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
     //     nullptr
     // );
 
+    context.time_ref = gst_caps_from_string(encoding::info_reference);
+    context.buffer_ref = gst_caps_from_string(encoding::buffer_reference);
+
     RCLCPP_INFO_STREAM(logger, "Initializing stream...");
 
     RCLCPP_INFO_STREAM(logger, "Setting stream ready...");
@@ -222,6 +228,38 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
     }
 
     return true;
+}
+
+inline void gst_unref(gstreamer_context_data& context) {
+    if(context.pipeline) {
+        gst_element_set_state(GST_ELEMENT(context.pipeline), GST_STATE_NULL);
+        gst_object_unref(context.pipeline);
+        context.pipeline = nullptr;
+
+        //XXX: Pipeline will clear up all other references as well
+        if(context.source != nullptr) context.source = nullptr;
+        if(context.sink != nullptr) context.sink = nullptr;
+    }
+
+    if(context.source != nullptr) {
+        gst_object_unref(context.source);
+        context.source = nullptr;
+    }
+
+    if(context.sink != nullptr) {
+        gst_object_unref(context.sink);
+        context.sink = nullptr;
+    }
+
+    if(context.time_ref != nullptr) {
+        gst_caps_unref(context.time_ref);
+        context.time_ref = nullptr;
+    }
+
+    if(context.buffer_ref != nullptr) {
+        gst_caps_unref(context.buffer_ref);
+        context.buffer_ref = nullptr;
+    }
 }
 
 //In a C++ world, these callbacks are (as defined above):

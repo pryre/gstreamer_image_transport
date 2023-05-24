@@ -9,6 +9,8 @@
 #include "image_transport/simple_subscriber_plugin.hpp"
 #include "gstreamer_image_transport/msg/data_packet.hpp"
 
+#include <map>
+
 namespace gstreamer_image_transport
 {
 
@@ -65,6 +67,8 @@ private:
     tooling::gstreamer_context_data _gst;
 
     rclcpp::Time _last_stamp;
+    mutable std::mutex _mutex;
+    std::map<GstClockTime, TransportType::ConstSharedPtr> _mem_map;
 };
 
 };

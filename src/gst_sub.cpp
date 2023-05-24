@@ -195,34 +195,13 @@ void GStreamerSubscriber::_gst_clean_up() {
 
     _gst_thread_stop();
 
-    if(_gst.pipeline) {
-        gst_element_set_state(GST_ELEMENT(_gst.pipeline), GST_STATE_NULL);
-        gst_object_unref(_gst.pipeline);
-        _gst.pipeline = nullptr;
-
-        //XXX: Pipeline will clear up all other references as well
-        if(_gst.source != nullptr) _gst.source = nullptr;
-        if(_gst.sink != nullptr) _gst.sink = nullptr;
-    }
-
-    if(_gst.source != nullptr) {
-        gst_object_unref(_gst.source);
-        _gst.source = nullptr;
-    }
-
-    if(_gst.sink != nullptr) {
-        gst_object_unref(_gst.sink);
-        _gst.sink = nullptr;
-    }
-
+    tooling::gst_unref(_gst);
     // RCLCPP_INFO(_logger, "Deinit GST...");
     // gst_deinit();
     // RCLCPP_INFO(_logger, "Done!");
 }
 
-void GStreamerSubscriber::_cb_packet(
-  const gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & message) {
-
+void GStreamerSubscriber::_cb_packet(const gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & message) {
     const auto frame_stamp = rclcpp::Time(message->header.stamp);
     const auto frame_delta = frame_stamp - _last_stamp;
     //TODO: Check that ROS time has been reset, and if so, reset stream
@@ -266,42 +245,35 @@ void GStreamerSubscriber::_cb_packet(
     }
 
     const size_t data_size = message->data.size()*sizeof(gstreamer_image_transport::msg::DataPacket::_data_type::value_type);
-    // auto mem = gst_memory_new_wrapped(
-    //     GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
-    //     (gpointer)message->data.data(),
-    //     data_size, 0, data_size,
-    //     nullptr, nullptr
-    // );
+    auto mem = gst_memory_new_wrapped(
+        GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
+        (gpointer)message->data.data(),
+        data_size, 0, data_size,
+        nullptr, nullptr
+    );
+    auto buffer = gst_buffer_new();
+    gst_buffer_append_memory(buffer, mem);
 
-    GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
-    GstMapInfo map;
-    if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
-        RCLCPP_ERROR(_logger, "Could allocate buffer");
-        gst_buffer_unref(buffer);
-        return;
-    }
-    const auto data = std::span(map.data, map.size);
-    if(data.size() != data_size) {
-        RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
-        gst_buffer_unref(buffer);
-        return;
-    }
-    std::copy(message->data.begin(), message->data.end(), data.begin());
-    gst_buffer_unmap (buffer, &map);
+    //XXX: Memory by copy
+    // GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
+    // GstMapInfo map;
+    // if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
+    //     RCLCPP_ERROR(_logger, "Could allocate buffer");
+    //     gst_buffer_unref(buffer);
+    //     return;
+    // }
+    // const auto data = std::span(map.data, map.size);
+    // if(data.size() != data_size) {
+    //     RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
+    //     gst_buffer_unref(buffer);
+    //     return;
+    // }
+    // std::copy(message->data.begin(), message->data.end(), data.begin());
+    // gst_buffer_unmap (buffer, &map);
 
-    if(!GST_IS_CAPS(encoding::info_reference)) RCLCPP_ERROR(_logger, "NO CAP");
-    gst_buffer_add_reference_timestamp_meta(buffer, encoding::info_reference, common::ros_time_to_gst(message->frame_stamp), GST_CLOCK_TIME_NONE);
-
-    // gst_buffer_append_memory(buffer, mem);
-    // const timespec ts {message->header.stamp.sec, message->header.stamp.nanosec};
-    // const auto g_stamp = GST_TIMESPEC_TO_TIME(ts);
-    // gst_buffer_add_reference_timestamp_meta(buffer, caps, g_stamp, GST_CLOCK_TIME_NONE);
-    // auto segment_in = gst_segment_new();
-    // gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
-    // gst_segment_position_from_running_time(segment_in, GstFormat::GST_FORMAT_TIME, g_stamp);
-
-    // auto info_in = msg->extra.empty() ? nullptr : gst_structure_from_string(msg->extra.c_str(), NULL);
-    // auto info = common::get_info(message->header);
+    const auto mem_stamp = common::ros_time_to_gst(message->header.stamp);
+    gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, common::ros_time_to_gst(message->frame_stamp), GST_CLOCK_TIME_NONE);
+    gst_buffer_add_reference_timestamp_meta(buffer, _gst.buffer_ref, mem_stamp, GST_CLOCK_TIME_NONE);
 
     const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
 
@@ -309,7 +281,15 @@ void GStreamerSubscriber::_cb_packet(
     g_signal_emit_by_name(_gst.source, "push-sample", sample, &ret);
     gst_sample_unref(sample);
 
-    if (ret != GST_FLOW_OK) {
+    if (ret == GST_FLOW_OK) {
+        _mutex.lock();
+        if (_mem_map.find(mem_stamp) != _mem_map.end()) {
+            RCLCPP_FATAL(_logger, "Duplicate frame detected, dropping previous!");
+        }
+
+        _mem_map[mem_stamp] = message;
+        _mutex.unlock();
+    } else {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
 }
@@ -334,8 +314,20 @@ bool GStreamerSubscriber::_receive_sample(GstSample* sample) {
     gst_buffer_unmap (buffer, &map);
 
     //Attempt to get image data, or stamp it now if it doesn't exist
-    auto ref = gst_buffer_get_reference_timestamp_meta(buffer, encoding::info_reference);
-    image->header.stamp = ref ? rclcpp::Time(ref->timestamp, RCL_ROS_TIME) : _node->get_clock()->now();
+    auto frame_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.time_ref);
+    image->header.stamp = frame_ref ? rclcpp::Time(frame_ref->timestamp, RCL_ROS_TIME) : _node->get_clock()->now();
+
+    auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
+    if(buffer_ref) {
+        _mutex.lock();
+        const auto it = _mem_map.find(buffer_ref->timestamp);
+        if (it != _mem_map.end()) {
+            _mem_map.erase(it);
+        }
+        _mutex.unlock();
+    } else {
+        RCLCPP_FATAL(_logger, "No buffer reference found, potential memory leak!");
+    }
 
     _image_callback(image);
 

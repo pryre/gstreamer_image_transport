@@ -29,8 +29,8 @@ const auto info_meta_name = "ros-frame";
 const auto info_meta_frame_id = "id";
 const auto info_meta_stamp = "stamp";
 
-const auto info_reference = gst_caps_from_string("timestamp/x-ros-camera-stream");
-
+const auto info_reference = "timestamp/x-ros-camera-stream";
+const auto buffer_reference = "timestamp/x-ros-buffer-stream";
 };
 
 };

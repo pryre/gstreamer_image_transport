@@ -192,25 +192,7 @@ void GStreamerPublisher::_gst_clean_up() {
 
     _gst_thread_stop();
 
-    if(_gst.pipeline) {
-        gst_element_set_state(GST_ELEMENT(_gst.pipeline), GST_STATE_NULL);
-        gst_object_unref(_gst.pipeline);
-        _gst.pipeline = nullptr;
-
-        //XXX: Pipeline will clear up all other references as well
-        if(_gst.source != nullptr) _gst.source = nullptr;
-        if(_gst.sink != nullptr) _gst.sink = nullptr;
-    }
-
-    if(_gst.source != nullptr) {
-        gst_object_unref(_gst.source);
-        _gst.source = nullptr;
-    }
-
-    if(_gst.sink != nullptr) {
-        gst_object_unref(_gst.sink);
-        _gst.sink = nullptr;
-    }
+    tooling::gst_unref(_gst);
 
     // RCLCPP_INFO(_logger, "Deinit GST...");
     // gst_deinit();
@@ -318,19 +300,17 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
         return;
     }
 
-    // RCLCPP_INFO_STREAM(_logger, "Frame delta: " << frame_delta.to_chrono<std::chrono::milliseconds>());
     //XXX: At this point we should be confident that the stream is monotonic and we have a valid stamp
 
     const size_t data_size = message.data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
+    GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
+    //XXX: Non-copy insert
     // auto mem = gst_memory_new_wrapped(
     //     GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
     //     (gpointer)message.data.data(),
     //     data_size, 0, data_size,
     //     nullptr, nullptr
     // );
-
-    // RCLCPP_INFO(_logger, "BUFFER");
-    GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
     // gst_buffer_append_memory(buffer, mem);
 
     GstMapInfo map;
@@ -353,23 +333,14 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
     const auto g_frame_stamp = common::ros_time_to_gst(frame_mark);
     const auto g_delta = common::ros_time_to_gst(frame_delta);
 
-    // RCLCPP_INFO_STREAM(_logger, "BUFFER_TIME: " << g_stream_stamp);
-    // RCLCPP_INFO_STREAM(_logger, "ROS_TIME: " << g_frame_stamp);
     GST_BUFFER_PTS(buffer) = g_stream_stamp;
     GST_BUFFER_DTS(buffer) = g_stream_stamp;
     GST_BUFFER_OFFSET(buffer) = g_stream_stamp;
     GST_BUFFER_DURATION(buffer) = g_delta;
 
-    gst_buffer_add_reference_timestamp_meta(buffer, encoding::info_reference, g_frame_stamp, GST_CLOCK_TIME_NONE);
-    // auto segment_in = gst_segment_new();
-    // gst_segment_init(segment_in, GstFormat::GST_FORMAT_TIME);
-    // gst_segment_position_from_running_time(segment_in, GstFormat::GST_FORMAT_TIME, g_stamp);
+    gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, g_frame_stamp, GST_CLOCK_TIME_NONE);
 
-    // auto info = common::get_info(message.header);
-
-    // RCLCPP_INFO(_logger, "SAMPLE");
     const auto sample_in = gst_sample_new(buffer, caps, nullptr, nullptr);
-    // gst_object_unref(info);
 
     GstFlowReturn ret;
     g_signal_emit_by_name(_gst.source, "push-sample", sample_in, &ret);
@@ -412,7 +383,7 @@ bool GStreamerPublisher::_receive_sample(GstSample* sample) {
     packet.data.assign(data.begin(), data.end());
     gst_buffer_unmap (buffer, &map);
 
-    const auto ref = gst_buffer_get_reference_timestamp_meta(buffer, encoding::info_reference);
+    const auto ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.time_ref);
     packet.frame_stamp = ref ? rclcpp::Time(ref->timestamp, RCL_ROS_TIME) : common::ros_time_zero;
 
     _pub->publish(packet);
