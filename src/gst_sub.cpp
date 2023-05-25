@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <memory>
+#include <span>
 #include <rclcpp/subscription_options.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
@@ -229,7 +230,7 @@ void GStreamerSubscriber::_cb_packet(const gstreamer_image_transport::msg::DataP
     //TODO: Check that ROS time has been reset, and if so, reset stream
 
     if(frame_delta < common::duration_zero) {
-        RCLCPP_WARN_STREAM(_logger, "Discarding frame due to old stamp: " << frame_delta.to_chrono<std::chrono::milliseconds>());
+        RCLCPP_WARN_STREAM(_logger, "Discarding frame due to old stamp: " << frame_delta.to_chrono<std::chrono::milliseconds>().count() << "ms");
         return;
     }
 

@@ -289,14 +289,14 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
 
     //Handle the outcomes of the logic after unlocking
     if(!stream_delta_ok) {
-        RCLCPP_WARN_STREAM(_logger, "Discarding frame, originated before stream start: " << stream_delta.to_chrono<std::chrono::milliseconds>());
+        RCLCPP_WARN_STREAM(_logger, "Discarding frame, originated before stream start: " << stream_delta.to_chrono<std::chrono::milliseconds>().count() << "ms");
 
         //TODO: Could also do a rclcpp time check here to see if sim time has reset, and reset all from that
         return;
     }
 
     if(!frame_delta_ok) {
-        RCLCPP_WARN_STREAM(_logger, "Discarding frame due to old stamp: " << frame_delta.to_chrono<std::chrono::milliseconds>());
+        RCLCPP_WARN_STREAM(_logger, "Discarding frame due to old stamp: " << frame_delta.to_chrono<std::chrono::milliseconds>().count() << "ms");
         return;
     }
 
