@@ -16,26 +16,6 @@ namespace gstreamer_image_transport
 
 class GStreamerSubscriber : public image_transport::SubscriberPlugin {
 
-using TransportType = gstreamer_image_transport::msg::DataPacket;
-
-struct SharedMemoryImagePointer {
-    GstBuffer* buf;
-    TransportType::ConstSharedPtr img;
-
-    // StampedImagePointer(GstBuffer* buffer, TransportType::ConstSharedPtr img_ptr) :
-    // ref(gst_buffer_ref(buffer)),
-    // img(img_ptr) {}
-
-    ~SharedMemoryImagePointer() {
-        if( GST_OBJECT_REFCOUNT_VALUE(buf) >= 1)
-            gst_buffer_unref(buf);
-    }
-
-    static bool is_valid_reference(const SharedMemoryImagePointer& ptr) {
-        return GST_OBJECT_REFCOUNT_VALUE(ptr.buf);
-    }
-};
-
 public:
     GStreamerSubscriber();
     ~GStreamerSubscriber();
@@ -62,7 +42,7 @@ private:
     void _gst_thread_run();
     void _gst_thread_stop();
 
-    void _cb_packet(const typename gstreamer_image_transport::msg::DataPacket::ConstSharedPtr& message);
+    void _cb_packet(const typename common::TransportType::ConstSharedPtr& message);
     bool _receive_sample(GstSample* sample);
     size_t _clean_mem_queue();
 
@@ -70,7 +50,7 @@ private:
     bool _has_shutdown;
     rclcpp::Node* _node;
     rclcpp::Logger _logger;
-    rclcpp::Subscription<TransportType>::SharedPtr _sub;
+    rclcpp::Subscription<common::TransportType>::SharedPtr _sub;
     Callback _image_callback;
 
     std::string _pipeline_internal;
@@ -87,7 +67,7 @@ private:
 
     rclcpp::Time _last_stamp;
     mutable std::mutex _mutex;
-    std::deque<SharedMemoryImagePointer> _mem_queue;
+    std::deque<common::SharedMemoryPointerMap<const common::TransportType::ConstSharedPtr>> _mem_queue;
 };
 
 };

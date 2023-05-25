@@ -117,7 +117,7 @@ size_t GStreamerSubscriber::_clean_mem_queue() {
     // const auto initial_size = _mem_queue.size();
     //Skim through our packet memory buffer
     //Idea is to drop all of the previous memory packets that are unused
-    _mem_queue.erase(std::remove_if(_mem_queue.begin(), _mem_queue.end(), SharedMemoryImagePointer::is_valid_reference), _mem_queue.end());
+    _mem_queue.erase(std::remove_if(_mem_queue.begin(), _mem_queue.end(), common::SharedMemoryPointerMap<const common::TransportType::ConstSharedPtr>::is_valid_reference), _mem_queue.end());
 
     const auto end_size = _mem_queue.size();
     _mutex.unlock();
@@ -158,7 +158,7 @@ void GStreamerSubscriber::subscribeImpl(rclcpp::Node * node, const std::string &
     _image_callback = callback;
     const std::string transport_topic = common::get_topic(base_topic, getTransportName());
     auto qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(custom_qos), custom_qos);
-    _sub = _node->create_subscription<TransportType>(
+    _sub = _node->create_subscription<common::TransportType>(
         transport_topic,
         qos,
         std::bind(&GStreamerSubscriber::_cb_packet, this, std::placeholders::_1),
@@ -224,7 +224,7 @@ void GStreamerSubscriber::_gst_clean_up() {
     // RCLCPP_INFO(_logger, "Done!");
 }
 
-void GStreamerSubscriber::_cb_packet(const gstreamer_image_transport::msg::DataPacket::ConstSharedPtr & message) {
+void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr& message) {
     const auto frame_stamp = rclcpp::Time(message->header.stamp);
     const auto frame_delta = frame_stamp - _last_stamp;
     //TODO: Check that ROS time has been reset, and if so, reset stream

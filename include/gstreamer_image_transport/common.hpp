@@ -29,6 +29,7 @@
 #include <sensor_msgs/image_encodings.hpp>
 
 #include "gstreamer_image_transport/encoding.hpp"
+#include "gstreamer_image_transport/msg/data_packet.hpp"
 
 using namespace std::chrono_literals;
 
@@ -176,6 +177,27 @@ inline void fill_image_details(const GstCaps* caps, sensor_msgs::msg::Image& ima
         }
     }
 }
+
+using TransportType = gstreamer_image_transport::msg::DataPacket;
+
+template<class T>
+struct SharedMemoryPointerMap {
+    GstBuffer* buf;
+    T mem;
+
+    SharedMemoryPointerMap(GstBuffer* buffer, T mem_ptr) :
+    buf(gst_buffer_ref(buffer)),
+    mem(mem_ptr) {}
+
+    ~SharedMemoryPointerMap() {
+        if( GST_OBJECT_REFCOUNT_VALUE(buf) >= 1)
+            gst_buffer_unref(buf);
+    }
+
+    static bool is_valid_reference(const SharedMemoryPointerMap<T>& ptr) {
+        return GST_OBJECT_REFCOUNT_VALUE(ptr.buf);
+    }
+};
 
 };
 

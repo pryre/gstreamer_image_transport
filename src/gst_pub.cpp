@@ -11,6 +11,7 @@
 #include <rcl_interfaces/msg/parameter_type.hpp>
 #include <rclcpp/duration.hpp>
 #include <rclcpp/node.hpp>
+#include <sensor_msgs/msg/detail/image__struct.hpp>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -117,11 +118,31 @@ void GStreamerPublisher::_gst_thread_run() {
             }
         }
 
+        //Clean our memory queue after each sample
+        //Other functions will do this at the end as well outside of this loop
+        _clean_mem_queue();
             // if(common::get_pipeline_state(_gst_pipeline, 10ms) != GST_STATE_READY)
             //     RCLCPP_ERROR(_logger, "Stream is not ready!");
 
             // return;
     }
+}
+
+size_t GStreamerPublisher::_clean_mem_queue() {
+    //Do some cleanup
+    // auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
+    _mutex_mem.lock();
+    // const auto initial_size = _mem_queue.size();
+    //Skim through our packet memory buffer
+    //Idea is to drop all of the previous memory packets that are unused
+    _mem_queue.erase(std::remove_if(_mem_queue.begin(), _mem_queue.end(), common::SharedMemoryPointerMap<sensor_msgs::msg::Image::ConstSharedPtr>::is_valid_reference), _mem_queue.end());
+
+    const auto end_size = _mem_queue.size();
+    _mutex_mem.unlock();
+
+    // RCLCPP_INFO_STREAM(_logger, "Mem: "  << end_size << "; Rem: " << (initial_size - end_size));
+
+    return end_size;
 }
 
 void GStreamerPublisher::_gst_thread_stop() {
@@ -189,6 +210,7 @@ void GStreamerPublisher::_gst_clean_up() {
     _has_shutdown = true;
 
     _gst_thread_stop();
+    _clean_mem_queue();
 
     tooling::gst_unref(_gst);
 
@@ -241,12 +263,12 @@ void GStreamerPublisher::advertiseImpl(rclcpp::Node* nh, const std::string& base
 
     const std::string transport_topic = common::get_topic(base_topic, getTransportName());
     const auto qos = rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(custom_qos), custom_qos);
-    _pub = _node->create_publisher<TransportType>(transport_topic, qos);
+    _pub = _node->create_publisher<common::TransportType>(transport_topic, qos);
 
     start();
 }
 
-void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const {
+void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPtr& message) const {
     if(!_pub || (getNumSubscribers() <= 0)) {
         return;
     }
@@ -256,22 +278,22 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
         return;
     }
 
-    auto caps = common::get_caps(message);
+    auto caps = common::get_caps(*message);
     if(!GST_IS_CAPS(caps)) {
         RCLCPP_ERROR_STREAM(_logger,
-            "Unable to reconfigure to format: " << message.encoding <<
-            "(" << message.width << "x" << message.height << ")"
+            "Unable to reconfigure to format: " << message->encoding <<
+            "(" << message->width << "x" << message->height << ")"
         );
 
         return;
     }
 
     //XXX: At this point we should have a supported stream (assuming pipeline is happy with it)
-    const auto frame_stamp = rclcpp::Time(message.header.stamp);
+    const auto frame_stamp = rclcpp::Time(message->header.stamp);
     const auto frame_mark = frame_stamp - common::ros_time_zero;
 
     //Perform all of our time calculations in lock
-    _mutex.lock();
+    _mutex_stamp.lock();
     if(_first_stamp == common::ros_time_zero) {
         _first_stamp = frame_stamp;
     }
@@ -283,7 +305,7 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
     const bool send_keyframe = _last_key - frame_stamp > _keyframe_interval;
     if(send_keyframe) _last_key = frame_stamp;
     if(stream_delta_ok && frame_delta_ok) _last_stamp = frame_stamp;
-    _mutex.unlock();
+    _mutex_stamp.unlock();
 
     //Handle the outcomes of the logic after unlocking
     if(!stream_delta_ok) {
@@ -300,31 +322,32 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
 
     //XXX: At this point we should be confident that the stream is monotonic and we have a valid stamp
 
-    const size_t data_size = message.data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
+    const size_t data_size = message->data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
     GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
     //XXX: Non-copy insert
-    // auto mem = gst_memory_new_wrapped(
-    //     GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
-    //     (gpointer)message.data.data(),
-    //     data_size, 0, data_size,
-    //     nullptr, nullptr
-    // );
-    // gst_buffer_append_memory(buffer, mem);
+    auto mem = gst_memory_new_wrapped(
+        GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
+        (gpointer)message->data.data(),
+        data_size, 0, data_size,
+        nullptr, nullptr
+    );
+    gst_buffer_append_memory(buffer, mem);
 
-    GstMapInfo map;
-    if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
-        RCLCPP_ERROR(_logger, "Could allocate buffer");
-        gst_buffer_unref(buffer);
-        return;
-    }
-    const auto data = std::span(map.data, map.size);
-    if(data.size() != data_size) {
-        RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
-        gst_buffer_unref(buffer);
-        return;
-    }
-    std::copy(message.data.begin(), message.data.end(), data.begin());
-    gst_buffer_unmap (buffer, &map);
+    //XXX: Copy memory version
+    // GstMapInfo map;
+    // if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
+    //     RCLCPP_ERROR(_logger, "Could allocate buffer");
+    //     gst_buffer_unref(buffer);
+    //     return;
+    // }
+    // const auto data = std::span(map.data, map.size);
+    // if(data.size() != data_size) {
+    //     RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
+    //     gst_buffer_unref(buffer);
+    //     return;
+    // }
+    // std::copy(message->data.begin(), message->data.end(), data.begin());
+    // gst_buffer_unmap (buffer, &map);
 
     //XXX: Use the stream delta to calculate our buffer timings
     const auto g_stream_stamp = common::ros_time_to_gst(stream_delta);
@@ -338,11 +361,11 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
 
     gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, g_frame_stamp, GST_CLOCK_TIME_NONE);
 
-    const auto sample_in = gst_sample_new(buffer, caps, nullptr, nullptr);
+    const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
+    const auto ref = gst_buffer_ref(gst_sample_get_buffer(sample));
 
     GstFlowReturn ret;
-    g_signal_emit_by_name(_gst.source, "push-sample", sample_in, &ret);
-    gst_sample_unref(sample_in);
+    g_signal_emit_by_name(_gst.source, "push-sample", sample, &ret);
 
     if(send_keyframe) {
         const auto pad = gst_element_get_static_pad(GST_ELEMENT(_gst.source), "sink");
@@ -353,9 +376,17 @@ void GStreamerPublisher::publish(const sensor_msgs::msg::Image & message) const 
         }
     }
 
-    if (ret != GST_FLOW_OK) {
+    if (ret == GST_FLOW_OK) {
+        //Add the timestamp of our packet memory to our list
+        _mutex_mem.lock();
+        const auto map = common::SharedMemoryPointerMap(ref, message);
+        _mem_queue.push_back(map);
+        _mutex_mem.unlock();
+    } else {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
+
+    gst_sample_unref(sample);
 }
 
 bool GStreamerPublisher::_receive_sample(GstSample* sample) {
