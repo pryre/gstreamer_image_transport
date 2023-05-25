@@ -40,11 +40,11 @@ namespace common {
 const auto duration_zero = rclcpp::Duration(0, 0);
 const auto ros_time_zero = rclcpp::Time(0, 0, RCL_ROS_TIME);
 
-constexpr std::string appsrc_name = "source";
-constexpr std::string appsink_name = "sink";
-constexpr std::string pipeline_split = "!";
-constexpr std::string pipeline_split_spaced = " ! ";
-constexpr std::string transport_name = "gst";
+const std::string appsrc_name = "source";
+const std::string appsink_name = "sink";
+const std::string pipeline_split = "!";
+const std::string pipeline_split_spaced = " ! ";
+const std::string transport_name = "gst";
 
 inline std::string get_topic(const std::string& base_topic, const std::string& transport_name) {
     return base_topic + "/" + transport_name;

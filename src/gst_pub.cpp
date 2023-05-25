@@ -2,8 +2,6 @@
 #include "gstreamer_image_transport/common.hpp"
 #include "gstreamer_image_transport/gst_pub.hpp"
 
-#include <bits/chrono.h>
-#include <bits/types/struct_timespec.h>
 #include <cstdint>
 #include <cstring>
 #include <memory>
