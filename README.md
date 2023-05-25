@@ -28,6 +28,8 @@ Attempt 2:
 ros2 run gscam gscam_node --ros-args -p gscam_config:='v4l2src device=/dev/video0 ! video/x-raw,framerate=30/1 ! videoconvert'
 # Encoded
 ros2 run gscam gscam_node --ros-args -p gscam_config:='v4l2src device=/dev/video0 ! video/x-raw,framerate=30/1 ! videoconvert' -p gst_pub.pipeline:='videorate ! video/x-raw,framerate=10/1 ! videoconvert ! vaapih264enc'
+# Raspberry Pi
+ros2 run gscam gscam_node --ros-args -p gscam_config:='libcamerasrc ! video/x-raw,framerate=30/1 ! videoconvert' -p gst_pub.pipeline:='videorate ! video/x-raw,framerate=10/1 ! videoconvert ! v4l2h264enc ! video/x-h264,level=(string)3'
 ```
 
 ```sh
