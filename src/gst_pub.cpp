@@ -132,10 +132,21 @@ size_t GStreamerPublisher::_clean_mem_queue() {
     //Do some cleanup
     // auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
     _mutex_mem.lock();
+    // RCLCPP_INFO_STREAM(_logger, "COUNT: " << (_mem_queue.size() ? GST_MINI_OBJECT_REFCOUNT_VALUE(_mem_queue.front().buf) : 0));
+
     // const auto initial_size = _mem_queue.size();
     //Skim through our packet memory buffer
     //Idea is to drop all of the previous memory packets that are unused
-    _mem_queue.erase(std::remove_if(_mem_queue.begin(), _mem_queue.end(), common::SharedMemoryPointerMap<sensor_msgs::msg::Image::ConstSharedPtr>::is_valid_reference), _mem_queue.end());
+    //Seems like we have to stop once we have some queued memory that is still
+    //in use as something may be half-way through a hand-over
+    // std::erase_if(_mem_queue, common::MemoryMap<common::ConstSharedImageType>::is_last_reference);
+    while(!_mem_queue.empty()) {
+        if(_mem_queue.front().is_last_reference()) {
+            _mem_queue.pop_front();
+        } else {
+            break;
+        }
+    }
 
     const auto end_size = _mem_queue.size();
     _mutex_mem.unlock();
@@ -176,7 +187,7 @@ void GStreamerPublisher::start() {
     tooling::gst_do_init(_logger);
     tooling::gst_set_debug_level(_force_debug_level);
 
-    if(!tooling::gst_configure(_logger, _pipeline_internal, _gst)) {
+    if(!tooling::gst_configure(_pipeline_internal, _gst)) {
         _gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
@@ -278,16 +289,6 @@ void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPt
         return;
     }
 
-    auto caps = common::get_caps(*message);
-    if(!GST_IS_CAPS(caps)) {
-        RCLCPP_ERROR_STREAM(_logger,
-            "Unable to reconfigure to format: " << message->encoding <<
-            "(" << message->width << "x" << message->height << ")"
-        );
-
-        return;
-    }
-
     //XXX: At this point we should have a supported stream (assuming pipeline is happy with it)
     const auto frame_stamp = rclcpp::Time(message->header.stamp);
     const auto frame_mark = frame_stamp - common::ros_time_zero;
@@ -302,7 +303,7 @@ void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPt
     //Do check logic here to avoid mismatch errors
     const bool stream_delta_ok = stream_delta >= common::duration_zero;
     const bool frame_delta_ok = frame_delta >= common::duration_zero;
-    const bool send_keyframe = _last_key - frame_stamp > _keyframe_interval;
+    const bool send_keyframe = frame_stamp - _last_key > _keyframe_interval;
     if(send_keyframe) _last_key = frame_stamp;
     if(stream_delta_ok && frame_delta_ok) _last_stamp = frame_stamp;
     _mutex_stamp.unlock();
@@ -320,10 +321,19 @@ void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPt
         return;
     }
 
+    auto caps = common::get_caps(*message);
+    if(!GST_IS_CAPS(caps)) {
+        RCLCPP_ERROR_STREAM(_logger,
+            "Unable to reconfigure to format: " << message->encoding <<
+            "(" << message->width << "x" << message->height << ")"
+        );
+
+        return;
+    }
+
     //XXX: At this point we should be confident that the stream is monotonic and we have a valid stamp
 
     const size_t data_size = message->data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
-    GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
     //XXX: Non-copy insert
     auto mem = gst_memory_new_wrapped(
         GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
@@ -331,6 +341,8 @@ void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPt
         data_size, 0, data_size,
         nullptr, nullptr
     );
+
+    GstBuffer* buffer = gst_buffer_new();
     gst_buffer_append_memory(buffer, mem);
 
     //XXX: Copy memory version
@@ -362,31 +374,26 @@ void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPt
     gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, g_frame_stamp, GST_CLOCK_TIME_NONE);
 
     const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
-    const auto ref = gst_buffer_ref(gst_sample_get_buffer(sample));
 
-    GstFlowReturn ret;
+    GstFlowReturn ret = GST_FLOW_ERROR;
     g_signal_emit_by_name(_gst.source, "push-sample", sample, &ret);
-
-    if(send_keyframe) {
-        const auto pad = gst_element_get_static_pad(GST_ELEMENT(_gst.source), "sink");
-        if(pad) {
-            tooling::send_keyframe(pad, g_stream_stamp, g_stream_stamp, g_stream_stamp);
-        } else {
-            RCLCPP_ERROR(_logger, "Could not insert keyframe, pad not found");
-        }
-    }
+    gst_sample_unref(sample);
+    gst_caps_unref(caps);
 
     if (ret == GST_FLOW_OK) {
-        //Add the timestamp of our packet memory to our list
+        //Add the buffer and message to our memory list
         _mutex_mem.lock();
-        const auto map = common::SharedMemoryPointerMap(ref, message);
-        _mem_queue.push_back(map);
+        _mem_queue.emplace_back(buffer, message);
         _mutex_mem.unlock();
     } else {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
 
-    gst_sample_unref(sample);
+    gst_buffer_unref(buffer);
+
+    if(send_keyframe && _gst.pipeline) {
+        tooling::send_keyframe(_gst.pipeline, g_stream_stamp, g_stream_stamp, g_stream_stamp);
+    }
 }
 
 bool GStreamerPublisher::_receive_sample(GstSample* sample) {

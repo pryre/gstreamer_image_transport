@@ -103,7 +103,7 @@ private:
     mutable rclcpp::Duration _keyframe_interval;
 
     mutable std::mutex _mutex_mem;
-    mutable std::deque<common::SharedMemoryPointerMap<const sensor_msgs::msg::Image::ConstSharedPtr>> _mem_queue;
+    mutable std::deque<common::MemoryMap<common::ConstSharedImageType>> _mem_queue;
 };
 
 };

@@ -117,7 +117,16 @@ size_t GStreamerSubscriber::_clean_mem_queue() {
     // const auto initial_size = _mem_queue.size();
     //Skim through our packet memory buffer
     //Idea is to drop all of the previous memory packets that are unused
-    _mem_queue.erase(std::remove_if(_mem_queue.begin(), _mem_queue.end(), common::SharedMemoryPointerMap<const common::TransportType::ConstSharedPtr>::is_valid_reference), _mem_queue.end());
+    //Seems like we have to stop once we have some queued memory that is still
+    //in use as something may be half-way through a hand-over
+    // std::erase_if(_mem_queue, common::MemoryMap<common::ConstSharedImageType>::is_last_reference);
+    while(!_mem_queue.empty()) {
+        if(_mem_queue.front().is_last_reference()) {
+            _mem_queue.pop_front();
+        } else {
+            break;
+        }
+    }
 
     const auto end_size = _mem_queue.size();
     _mutex.unlock();
@@ -184,7 +193,7 @@ void GStreamerSubscriber::start() {
     tooling::gst_do_init(_logger);
     tooling::gst_set_debug_level(_force_debug_level);
 
-    if(!tooling::gst_configure(_logger, _pipeline_internal, _gst)) {
+    if(!tooling::gst_configure(_pipeline_internal, _gst)) {
         _gst_clean_up();
         const auto msg = "Unable to configure GStreamer";
         RCLCPP_FATAL_STREAM(_logger, msg);
@@ -300,21 +309,22 @@ void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr
     // gst_buffer_add_reference_timestamp_meta(buffer, _gst.buffer_ref, mem_stamp, GST_CLOCK_TIME_NONE);
 
     const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
-    const auto ref = gst_buffer_ref(gst_sample_get_buffer(sample));
 
     GstFlowReturn ret;
     g_signal_emit_by_name(_gst.source, "push-sample", sample, &ret);
+    gst_sample_unref(sample);
+    gst_caps_unref(caps);
 
     if (ret == GST_FLOW_OK) {
         //Add the timestamp of our packet memory to our list
         _mutex.lock();
-        _mem_queue.emplace_back(ref, message);
+        _mem_queue.emplace_back(buffer, message);
         _mutex.unlock();
     } else {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
 
-    gst_sample_unref(sample);
+    gst_buffer_unref(buffer);
 }
 
 bool GStreamerSubscriber::_receive_sample(GstSample* sample) {

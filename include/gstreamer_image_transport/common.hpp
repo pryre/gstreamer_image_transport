@@ -15,6 +15,7 @@
 
 
 #include <gst/gstpipeline.h>
+#include "gst/gstbuffer.h"
 #include "gst/gstcaps.h"
 #include "gst/gstcapsfeatures.h"
 #include "gst/gstclock.h"
@@ -178,25 +179,41 @@ inline void fill_image_details(const GstCaps* caps, sensor_msgs::msg::Image& ima
     }
 }
 
+using ImageType = sensor_msgs::msg::Image;
+using ConstSharedImageType = sensor_msgs::msg::Image::ConstSharedPtr;
 using TransportType = gstreamer_image_transport::msg::DataPacket;
+using ConstSharedTransportType = gstreamer_image_transport::msg::DataPacket::ConstSharedPtr;
 
 template<class T>
-struct SharedMemoryPointerMap {
+struct MemoryMap {
     GstBuffer* buf;
     T mem;
 
-    SharedMemoryPointerMap(GstBuffer* buffer, T mem_ptr) :
+    MemoryMap(GstBuffer* buffer, T mem_ptr) :
     buf(gst_buffer_ref(buffer)),
     mem(mem_ptr) {}
 
-    ~SharedMemoryPointerMap() {
-        if( GST_OBJECT_REFCOUNT_VALUE(buf) >= 1)
+    ~MemoryMap() {
+        if( GST_MINI_OBJECT_REFCOUNT_VALUE(buf) >= 1)
             gst_buffer_unref(buf);
     }
 
-    static bool is_valid_reference(const SharedMemoryPointerMap<T>& ptr) {
-        return GST_OBJECT_REFCOUNT_VALUE(ptr.buf);
+    static bool is_last_reference(const MemoryMap<T>& ptr) {
+        return gst_buffer_is_writable(ptr.buf);
     }
+
+    bool is_last_reference() const {
+        return gst_buffer_is_writable(buf);
+    }
+
+    // static bool is_valid(const MemoryMap<T>& ptr) {
+    //     return GST_IS_BUFFER(ptr.buf);
+    //     // return true;
+    // }
+
+    // static bool memory_unused(const MemoryMap<T>& ptr) {
+    //     return is_last_reference(ptr) || !is_valid(ptr);
+    // }
 };
 
 };

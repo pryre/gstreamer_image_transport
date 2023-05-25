@@ -18,6 +18,8 @@
 #include "gst/gstcaps.h"
 #include "gst/gstcapsfeatures.h"
 #include "gst/gstclock.h"
+#include "gst/gstelement.h"
+#include "gst/gstevent.h"
 #include "gst/gstmeta.h"
 #include "gst/gstpad.h"
 #include "gst/gststructure.h"
@@ -45,6 +47,7 @@ struct gstreamer_context_data {
     // GMainLoop* loop = nullptr;
     GstPipeline *pipeline = nullptr;
     GstAppSrc *source = nullptr;
+    // GstPad *source_output_pad = nullptr;
     GstAppSink *sink = nullptr;
     GstCaps *time_ref = nullptr;
     // GstCaps *buffer_ref = nullptr;
@@ -115,7 +118,7 @@ inline std::string get_appsrc_str(const std::string_view name = common::appsrc_n
 
 inline std::string get_appsink_str(const std::string_view name = common::appsink_name) {
     // return std::string("queue").append(common::pipeline_split_spaced).append("appsink name=").append(name);
-    return std::string("appsink name=").append(name);
+    return std::string("queue ! appsink name=").append(name);
 }
 
 inline GstState get_pipeline_state(GstPipeline* pipeline, std::chrono::system_clock::duration timeout = std::chrono::system_clock::duration::zero()) {
@@ -160,21 +163,20 @@ inline void gst_set_debug_level(const int64_t debug_level) {
 }
 
 //XXX: This should always be called after `gst_do_init()`
-inline bool gst_configure(const rclcpp::Logger logger, const std::string pipeline_internal, gstreamer_context_data& context) {
+inline bool gst_configure(const std::string pipeline_internal, gstreamer_context_data& context) {
     //Append our parts to the pipeline
     const auto pipeline_str = get_appsrc_str()
                             + (pipeline_internal.empty() ? "" : common::pipeline_split_spaced + pipeline_internal)
                             + common::pipeline_split_spaced
                             + get_appsink_str();
-    RCLCPP_INFO_STREAM(logger, "Using pipeline: \"" << pipeline_str << "\"");
+    RCLCPP_INFO_STREAM(*context.logger, "Using pipeline: \"" << pipeline_str << "\"");
 
-
-    RCLCPP_INFO_STREAM(logger, "Parsing pipeline...");
+    RCLCPP_INFO_STREAM(*context.logger, "Parsing pipeline...");
     GError * error = nullptr;  // Assignment to zero is a gst requirement
     const auto try_pipeline = gst_parse_launch(pipeline_str.c_str(), &error);
 
     if (!GST_IS_PIPELINE(try_pipeline) || error) {
-        RCLCPP_FATAL_STREAM(logger, "Error parsing pipeline: " << (error ? error->message : "unknown error"));
+        RCLCPP_FATAL_STREAM(*context.logger, "Error parsing pipeline: " << (error ? error->message : "unknown error"));
         return false;
     }
 
@@ -187,7 +189,7 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
     const auto sink_ok = GST_IS_APP_SINK(appsink);
     if (!src_ok || !sink_ok) {
         RCLCPP_FATAL_STREAM(
-            logger,
+            *context.logger,
             "Failed to generate app elements ("
             << (!src_ok ? "appsrc" : "")
             << (!src_ok && !sink_ok ? ", " : "")
@@ -208,6 +210,18 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
         nullptr
     );
 
+    // const auto pads = GST_ELEMENT_PADS(GST_ELEMENT(context.source));
+    // auto p = pads->next;
+    // while(p) {
+    //     RCLCPP_INFO_STREAM(*context.logger, "Pad: " << GST_PAD_NAME(GST_PAD(p)));
+    //     p = pads->next;
+    // }
+
+    // context.source_output_pad = gst_element_get_static_pad(GST_ELEMENT(context.source), "src");
+    // if(!context.source_output_pad) {
+    //     RCLCPP_ERROR(*(context.logger), "Source output pad not found, cannot generate keyframes!");
+    // }
+
     // gst_app_sink_set_emit_signals(context.sink, true);
     // g_object_set(
     //     G_OBJECT(context.sink),
@@ -218,12 +232,12 @@ inline bool gst_configure(const rclcpp::Logger logger, const std::string pipelin
     context.time_ref = gst_caps_from_string(encoding::info_reference);
     // context.buffer_ref = gst_caps_from_string(encoding::buffer_reference);
 
-    RCLCPP_INFO_STREAM(logger, "Initializing stream...");
+    RCLCPP_INFO_STREAM(*context.logger, "Initializing stream...");
 
-    RCLCPP_INFO_STREAM(logger, "Setting stream ready...");
+    RCLCPP_INFO_STREAM(*context.logger, "Setting stream ready...");
     if (gst_element_set_state(GST_ELEMENT(context.pipeline), GST_STATE_READY) == GST_STATE_CHANGE_FAILURE) {
         const auto msg = "Could not initialise stream!";
-        RCLCPP_FATAL_STREAM(logger, msg);
+        RCLCPP_FATAL_STREAM(*context.logger, msg);
         return false;
     }
 
@@ -239,12 +253,17 @@ inline void gst_unref(gstreamer_context_data& context) {
         //XXX: Pipeline will clear up all other references as well
         if(context.source != nullptr) context.source = nullptr;
         if(context.sink != nullptr) context.sink = nullptr;
+        // if(context.source_output_pad != nullptr) context.source_output_pad = nullptr;
     }
 
     if(context.source != nullptr) {
         gst_object_unref(context.source);
         context.source = nullptr;
     }
+    // if(context.source_output_pad != nullptr) {
+    //     gst_object_unref(context.source_output_pad);
+    //     context.source_output_pad = nullptr;
+    // }
 
     if(context.sink != nullptr) {
         gst_object_unref(context.sink);
@@ -284,7 +303,7 @@ inline bool wait_for_pipeline_state_change(GstPipeline* pipeline) {
     return success == GST_STATE_CHANGE_SUCCESS;
 }
 
-inline void send_keyframe(GstPad* pad, const GstClockTime timestamp, const GstClockTime stream_time, const GstClockTime running_time) {
+inline void send_keyframe(GstPipeline* pipeline, const GstClockTime timestamp, const GstClockTime stream_time, const GstClockTime running_time) {
     //https://github.com/centricular/gstwebrtc-demos/issues/186
     //https://gstreamer.freedesktop.org/documentation/additional/design/keyframe-force.html?gi-language=c
 
@@ -301,7 +320,8 @@ inline void send_keyframe(GstPad* pad, const GstClockTime timestamp, const GstCl
         NULL
     );
     const auto event = gst_event_new_custom(GST_EVENT_CUSTOM_DOWNSTREAM, data);
-    gst_pad_send_event(pad, event);
+    gst_element_send_event(GST_ELEMENT(pipeline), event);
+    // gst_pad_send_event(pad, event);
 }
 
 };

@@ -42,7 +42,7 @@ private:
     void _gst_thread_run();
     void _gst_thread_stop();
 
-    void _cb_packet(const typename common::TransportType::ConstSharedPtr& message);
+    void _cb_packet(const common::ConstSharedTransportType& message);
     bool _receive_sample(GstSample* sample);
     size_t _clean_mem_queue();
 
@@ -66,8 +66,8 @@ private:
     tooling::gstreamer_context_data _gst;
 
     rclcpp::Time _last_stamp;
-    mutable std::mutex _mutex;
-    std::deque<common::SharedMemoryPointerMap<const common::TransportType::ConstSharedPtr>> _mem_queue;
+    std::mutex _mutex;
+    std::deque<common::MemoryMap<common::ConstSharedTransportType>> _mem_queue;
 };
 
 };
