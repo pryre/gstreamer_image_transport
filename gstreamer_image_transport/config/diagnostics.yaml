@@ -1,0 +1,22 @@
+
+/**:
+  ros__parameters:
+    # pub_rate: 1.0 # Optional
+    # base_path: '' # Optional, prepended to all diagnostic output
+    analyzers:
+      gstreamer_image_transport:
+        type: 'diagnostic_aggregator/AnalyzerGroup'
+        path: GStreamerImageTransport
+        analyzers:
+          publishers:
+            type: 'diagnostic_aggregator/GenericAnalyzer'
+            path: Publishers
+            contains: ['gst_pub']
+          subscribers:
+            type: 'diagnostic_aggregator/GenericAnalyzer'
+            path: Subscribers
+            contains: ['gst_sub']
+          # endpoints:
+          #   type: 'diagnostic_aggregator/GenericAnalyzer'
+          #   path: Subscribers
+          #   startswith: ['autopilot', 'payload']

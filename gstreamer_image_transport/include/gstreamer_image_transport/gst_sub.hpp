@@ -1,13 +1,17 @@
 #pragma once
 
+#include <memory>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/subscription_options.hpp>
 #include <string>
+#include <image_transport/subscriber_plugin.hpp>
 
 #include "gstreamer_image_transport/common.hpp"
+#include "gstreamer_image_transport/message_statistics.hpp"
 #include "gstreamer_image_transport/tooling.hpp"
-#include "image_transport/simple_subscriber_plugin.hpp"
-#include "gstreamer_image_transport/msg/data_packet.hpp"
+#include "gstreamer_image_transport_interfaces/msg/data_packet.hpp"
+#include <diagnostic_updater/diagnostic_updater.hpp>
+#include <diagnostic_updater/publisher.hpp>
 
 #include <deque>
 
@@ -48,7 +52,7 @@ private:
 
 private:
     bool _has_shutdown;
-    rclcpp::Node* _node;
+    std::shared_ptr<rclcpp::Node> _node;
     rclcpp::Logger _logger;
     rclcpp::Subscription<common::TransportType>::SharedPtr _sub;
     Callback _image_callback;
@@ -66,8 +70,24 @@ private:
     tooling::gstreamer_context_data _gst;
 
     rclcpp::Time _last_stamp;
-    std::mutex _mutex;
+    std::mutex _mutex_mem;
     std::deque<common::MemoryMap<common::ConstSharedTransportType>> _mem_queue;
+
+    mutable std::mutex _mutex_stamp;
+
+    double _dtf_min;
+    double _dtf_max;
+    mutable MessageStatistics _stats_incoming;
+    mutable MessageStatistics _stats_pipeline;
+
+    diagnostic_updater::FrequencyStatusParam _dtf;
+    diagnostic_updater::TimeStampStatusParam _dtt;
+    std::unique_ptr<diagnostic_updater::Updater> _diagnostics;
+    std::unique_ptr<diagnostic_updater::TopicDiagnostic> _diagnostics_topic_pipeline;
+    std::unique_ptr<diagnostic_updater::FunctionDiagnosticTask> _diagnostics_task_pipeline;
+
+    void _diagnostics_configure();
+    void _diagnostics_check_pipeline_stats(diagnostic_updater::DiagnosticStatusWrapper& stat);
 };
 
 };

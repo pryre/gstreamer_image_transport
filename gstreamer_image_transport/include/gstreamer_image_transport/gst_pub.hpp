@@ -2,36 +2,40 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <deque>
+#include <string_view>
+
 #include <rclcpp/clock.hpp>
 #include <rclcpp/duration.hpp>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/publisher.hpp>
-#include <sensor_msgs/msg/detail/image__struct.hpp>
-#include <sensor_msgs/msg/image.hpp>
-#include <string>
-#include <deque>
 
-#include "gst/app/gstappsrc.h"
-#include "gst/gstelement.h"
-#include "gst/gstpipeline.h"
 #include "gstreamer_image_transport/common.hpp"
 #include "gstreamer_image_transport/tooling.hpp"
-#include "gstreamer_image_transport/msg/data_packet.hpp"
-#include "image_transport/simple_publisher_plugin.hpp"
-#include <sensor_msgs/image_encodings.hpp>
-#include <string_view>
+#include "gstreamer_image_transport/message_statistics.hpp"
+#include "gstreamer_image_transport_interfaces/msg/data_packet.hpp"
 
+#include <sensor_msgs/image_encodings.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <diagnostic_updater/diagnostic_updater.hpp>
+#include <diagnostic_updater/publisher.hpp>
+
+#include "gst/gstelement.h"
+#include "gst/gstpipeline.h"
 #include "gst/app/gstappsrc.h"
 #include "gst/app/gstappsink.h"
 #include "gst/gst.h"
+
+#include <image_transport/publisher_plugin.hpp>
 
 using namespace std::chrono_literals;
 
 namespace gstreamer_image_transport
 {
 
-//TODO: Inherit straight from publisher plugin and run a thread for gstreamer
 class GStreamerPublisher : public image_transport::PublisherPlugin {
 
 public:
@@ -81,7 +85,7 @@ private:
     bool _receive_sample(GstSample* sample);
 
 private:
-    rclcpp::Node* _node;
+    std::shared_ptr<rclcpp::Node> _node;
     rclcpp::Logger _logger;
     rclcpp::Publisher<common::TransportType>::SharedPtr _pub;
     bool _has_shutdown;
@@ -104,6 +108,20 @@ private:
 
     mutable std::mutex _mutex_mem;
     mutable std::deque<common::MemoryMap<common::ConstSharedImageType>> _mem_queue;
+
+    double _dtf_min;
+    double _dtf_max;
+    mutable MessageStatistics _stats_incoming;
+    mutable MessageStatistics _stats_pipeline;
+
+    diagnostic_updater::FrequencyStatusParam _dtf;
+    diagnostic_updater::TimeStampStatusParam _dtt;
+    std::unique_ptr<diagnostic_updater::Updater> _diagnostics;
+    std::unique_ptr<diagnostic_updater::TopicDiagnostic> _diagnostics_topic_pipeline;
+    std::unique_ptr<diagnostic_updater::FunctionDiagnosticTask> _diagnostics_task_pipeline;
+
+    void _diagnostics_configure();
+    void _diagnostics_check_pipeline_stats(diagnostic_updater::DiagnosticStatusWrapper& stat);
 };
 
 };

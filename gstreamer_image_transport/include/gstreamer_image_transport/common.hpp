@@ -30,7 +30,7 @@
 #include <sensor_msgs/image_encodings.hpp>
 
 #include "gstreamer_image_transport/encoding.hpp"
-#include "gstreamer_image_transport/msg/data_packet.hpp"
+#include "gstreamer_image_transport_interfaces/msg/data_packet.hpp"
 
 using namespace std::chrono_literals;
 
@@ -181,8 +181,8 @@ inline void fill_image_details(const GstCaps* caps, sensor_msgs::msg::Image& ima
 
 using ImageType = sensor_msgs::msg::Image;
 using ConstSharedImageType = sensor_msgs::msg::Image::ConstSharedPtr;
-using TransportType = gstreamer_image_transport::msg::DataPacket;
-using ConstSharedTransportType = gstreamer_image_transport::msg::DataPacket::ConstSharedPtr;
+using TransportType = gstreamer_image_transport_interfaces::msg::DataPacket;
+using ConstSharedTransportType = gstreamer_image_transport_interfaces::msg::DataPacket::ConstSharedPtr;
 
 template<class T>
 struct MemoryMap {

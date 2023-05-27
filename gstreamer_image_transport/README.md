@@ -1,4 +1,4 @@
-# Gstreamer Image Transport
+# GStreamer Image Transport
 
 GStreamer Image Transport handler
 

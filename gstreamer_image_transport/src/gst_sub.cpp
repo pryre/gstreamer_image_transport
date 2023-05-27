@@ -41,7 +41,13 @@ GStreamerSubscriber::GStreamerSubscriber() :
     _pipeline_internal("decodebin"),
     _queue_size(10),
     _force_debug_level(-1),
-    _last_stamp(common::ros_time_zero)
+    _last_stamp(common::ros_time_zero),
+    _dtf_min(0.0),
+    _dtf_max(1000.0),
+    _stats_incoming("receiving"),
+    _stats_pipeline("pipeline"),
+    _dtf(&_dtf_min, &_dtf_max),
+    _dtt() //TODO: Tune?
 {
     _gst.logger = &_logger;
 }
@@ -49,6 +55,44 @@ GStreamerSubscriber::GStreamerSubscriber() :
 GStreamerSubscriber::~GStreamerSubscriber() {
     _gst_clean_up();
     _sub.reset();
+}
+
+void GStreamerSubscriber::_diagnostics_configure() {
+    _diagnostics = std::make_unique<diagnostic_updater::Updater>(_node);
+    _diagnostics_topic_pipeline = std::make_unique<diagnostic_updater::TopicDiagnostic>(
+        getTopic(), *_diagnostics, _dtf, _dtt
+    );
+    _diagnostics_task_pipeline = std::make_unique<diagnostic_updater::FunctionDiagnosticTask>(
+        "Pipeline status", std::bind(&GStreamerSubscriber::_diagnostics_check_pipeline_stats, this, std::placeholders::_1)
+    );
+
+    _diagnostics_topic_pipeline->addTask(&*_diagnostics_task_pipeline);
+}
+
+void GStreamerSubscriber::_diagnostics_check_pipeline_stats(diagnostic_updater::DiagnosticStatusWrapper& stat) {
+    const auto now = rclcpp::Time(_node->get_clock()->now(), RCL_ROS_TIME);
+
+    _mutex_stamp.lock();
+    const auto incoming_delay = _stats_incoming.delay_clean(now);
+    // const auto incoming_rate = _stats_incoming.rate_clean(now);
+    const auto transfer_rate = _stats_incoming.success_rate();
+    const auto pipeline_delay = _stats_pipeline.delay_clean(now);
+    // const auto pipeline_rate = _stats_pipeline.rate_clean(now);
+    _mutex_stamp.unlock();
+
+    if (transfer_rate > 0.9) {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Packet loss low");
+    } else if (transfer_rate > 0.5) {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "Packet loss medium");
+    } else {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR, "Packet loss high");
+    }
+
+    // stat.add("Receive rate (Hz)", incoming_rate);
+    stat.add("Transfer rate (%)", transfer_rate);
+    stat.add("Receive delay (ms)", incoming_delay.to_chrono<std::chrono::nanoseconds>() / 1.0ms);
+    // stat.add("Pipeline output rate (Hz)", pipeline_rate);
+    stat.add("Pipeline delay (ms)", pipeline_delay.to_chrono<std::chrono::nanoseconds>() / 1.0ms);
 }
 
 void GStreamerSubscriber::_gst_thread_start() {
@@ -113,7 +157,7 @@ void GStreamerSubscriber::_gst_thread_run() {
 size_t GStreamerSubscriber::_clean_mem_queue() {
     //Do some cleanup
     // auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
-    _mutex.lock();
+    _mutex_mem.lock();
     // const auto initial_size = _mem_queue.size();
     //Skim through our packet memory buffer
     //Idea is to drop all of the previous memory packets that are unused
@@ -129,7 +173,7 @@ size_t GStreamerSubscriber::_clean_mem_queue() {
     }
 
     const auto end_size = _mem_queue.size();
-    _mutex.unlock();
+    _mutex_mem.unlock();
 
     // RCLCPP_INFO_STREAM(_logger, "Mem: "  << end_size << "; Rem: " << (initial_size - end_size));
 
@@ -149,20 +193,20 @@ void GStreamerSubscriber::shutdown() {
 }
 
 void GStreamerSubscriber::subscribeImpl(rclcpp::Node * node, const std::string & base_topic, const Callback& callback, rmw_qos_profile_t custom_qos, rclcpp::SubscriptionOptions options) {
+    // Get encoder parameters
+    _node = node->create_sub_node(getModuleName());
     //Correct our logger name
-    _node = node;
     _logger = _node->get_logger().get_child(getModuleName());
 
-    // Get encoder parameters
-    const auto param_prefix = getModuleName() + ".";
+    const auto param_namespace = getModuleName() + ".";
 
     auto pipeline_internal_desc = rcl_interfaces::msg::ParameterDescriptor{};
     pipeline_internal_desc.description = "Encoding pipeline to use, will be prefixed by appsrc and postfixed with appsink at runtime";
-    _pipeline_internal = common::trim_copy(_node->declare_parameter(param_prefix + "pipeline", _pipeline_internal, pipeline_internal_desc));
+    _pipeline_internal = common::trim_copy(_node->declare_parameter(param_namespace + "pipeline", _pipeline_internal, pipeline_internal_desc));
 
     auto force_gst_debug_desc = rcl_interfaces::msg::ParameterDescriptor{};
     force_gst_debug_desc.description = "Forces GST to output debug data messages at specified level";
-    _force_debug_level = _node->declare_parameter(param_prefix + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
+    _force_debug_level = _node->declare_parameter(param_namespace + "force_gst_debug", _force_debug_level, force_gst_debug_desc);
 
     _image_callback = callback;
     const std::string transport_topic = common::get_topic(base_topic, getTransportName());
@@ -173,6 +217,10 @@ void GStreamerSubscriber::subscribeImpl(rclcpp::Node * node, const std::string &
         std::bind(&GStreamerSubscriber::_cb_packet, this, std::placeholders::_1),
         options
     );
+
+    _diagnostics_configure();
+    //No real way to map backwards, so map to camera/node_name
+    _diagnostics->setHardwareID(_logger.get_name());
 }
 
 void GStreamerSubscriber::reset() {
@@ -234,12 +282,14 @@ void GStreamerSubscriber::_gst_clean_up() {
 }
 
 void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr& message) {
+    const auto now = rclcpp::Time(_node->get_clock()->now(), RCL_ROS_TIME);
     const auto frame_stamp = rclcpp::Time(message->header.stamp);
     const auto frame_delta = frame_stamp - _last_stamp;
     //TODO: Check that ROS time has been reset, and if so, reset stream
 
     if(frame_delta < common::duration_zero) {
         RCLCPP_WARN_STREAM(_logger, "Discarding frame due to old stamp: " << frame_delta.to_chrono<std::chrono::milliseconds>().count() << "ms");
+        _stats_incoming.log(now, frame_stamp, true);
         return;
     }
 
@@ -262,21 +312,28 @@ void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr
 
     if(!_gst.feed_open) {
         RCLCPP_WARN_STREAM(_logger, "Pipeline not accepting data, packet dropped");
+        _stats_incoming.log(now, frame_stamp, true);
         return;
     }
 
     if(_last_caps.empty()) {
         RCLCPP_WARN_STREAM(_logger, "Invalid packet: no caps set");
+        _stats_incoming.log(now, frame_stamp, true);
         return;
     }
 
     auto caps = gst_caps_from_string(message->caps.c_str());
     if(!GST_IS_CAPS(caps) || message->caps.empty()) {
         RCLCPP_ERROR_STREAM(_logger, "Unable to parse caps: " << message->caps);
+        _stats_incoming.log(now, frame_stamp, true);
         return;
     }
 
-    const size_t data_size = message->data.size()*sizeof(gstreamer_image_transport::msg::DataPacket::_data_type::value_type);
+    _mutex_stamp.lock();
+    _stats_incoming.log(now, frame_stamp);
+    _mutex_stamp.unlock();
+
+    const size_t data_size = message->data.size()*sizeof(common::TransportType::_data_type::value_type);
     auto mem = gst_memory_new_wrapped(
         GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
         (gpointer)message->data.data(),
@@ -305,7 +362,12 @@ void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr
     // gst_buffer_unmap (buffer, &map);
 
     // const auto mem_stamp = common::ros_time_to_gst(message->header.stamp);
-    gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, common::ros_time_to_gst(message->frame_stamp), GST_CLOCK_TIME_NONE);
+
+    const auto g_now = common::ros_time_to_gst(now);
+    const auto g_stamp = common::ros_time_to_gst(message->header.stamp);
+
+    gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, g_stamp, GST_CLOCK_TIME_NONE);
+    gst_buffer_add_reference_timestamp_meta(buffer, _gst.pipeline_ref, g_now, GST_CLOCK_TIME_NONE);
     // gst_buffer_add_reference_timestamp_meta(buffer, _gst.buffer_ref, mem_stamp, GST_CLOCK_TIME_NONE);
 
     const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
@@ -317,9 +379,9 @@ void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr
 
     if (ret == GST_FLOW_OK) {
         //Add the timestamp of our packet memory to our list
-        _mutex.lock();
+        _mutex_mem.lock();
         _mem_queue.emplace_back(buffer, message);
-        _mutex.unlock();
+        _mutex_mem.unlock();
     } else {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
@@ -328,6 +390,8 @@ void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr
 }
 
 bool GStreamerSubscriber::_receive_sample(GstSample* sample) {
+    const auto now = rclcpp::Time(_node->get_clock()->now(), RCL_ROS_TIME);
+
     const auto caps = gst_sample_get_caps(sample);
 
     auto image = std::make_shared<sensor_msgs::msg::Image>();
@@ -349,6 +413,16 @@ bool GStreamerSubscriber::_receive_sample(GstSample* sample) {
     //Attempt to get image data, or stamp it now if it doesn't exist
     auto frame_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.time_ref);
     image->header.stamp = frame_ref ? rclcpp::Time(frame_ref->timestamp, RCL_ROS_TIME) : _node->get_clock()->now();
+
+
+    const auto ref_pipe = gst_buffer_get_reference_timestamp_meta(buffer, _gst.pipeline_ref);
+    _mutex_stamp.lock();
+    if(ref_pipe) {
+        const auto start_pipe = rclcpp::Time(ref_pipe->timestamp, now.get_clock_type());
+        _stats_pipeline.log(now, start_pipe);
+    }
+    _diagnostics_topic_pipeline->tick(now);
+    _mutex_stamp.unlock();
 
     _image_callback(image);
 

@@ -50,6 +50,7 @@ struct gstreamer_context_data {
     // GstPad *source_output_pad = nullptr;
     GstAppSink *sink = nullptr;
     GstCaps *time_ref = nullptr;
+    GstCaps *pipeline_ref = nullptr;
     // GstCaps *buffer_ref = nullptr;
     std::atomic<bool> feed_open {false};
 
@@ -230,6 +231,7 @@ inline bool gst_configure(const std::string pipeline_internal, gstreamer_context
     // );
 
     context.time_ref = gst_caps_from_string(encoding::info_reference);
+    context.pipeline_ref = gst_caps_from_string(encoding::pipeline_reference);
     // context.buffer_ref = gst_caps_from_string(encoding::buffer_reference);
 
     RCLCPP_INFO_STREAM(*context.logger, "Initializing stream...");
@@ -273,6 +275,11 @@ inline void gst_unref(gstreamer_context_data& context) {
     if(context.time_ref != nullptr) {
         gst_caps_unref(context.time_ref);
         context.time_ref = nullptr;
+    }
+
+    if(context.pipeline_ref != nullptr) {
+        gst_caps_unref(context.pipeline_ref);
+        context.pipeline_ref = nullptr;
     }
 
     // if(context.buffer_ref != nullptr) {
