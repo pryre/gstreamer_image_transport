@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <rclcpp/context.hpp>
+#include <rclcpp/logging.hpp>
 #include <rclcpp/utilities.hpp>
 #include <string>
 #include <algorithm>
@@ -214,6 +215,29 @@ struct MemoryMap {
     // static bool memory_unused(const MemoryMap<T>& ptr) {
     //     return is_last_reference(ptr) || !is_valid(ptr);
     // }
+};
+
+
+template<class T>
+struct MemoryContainer {
+    T ptr;
+
+    MemoryContainer(const T& p) : ptr(p) {}
+
+    static MemoryContainer* create(const T& p) {
+        return new MemoryContainer(p);
+    }
+
+    static void remove(MemoryContainer<T>* p) {
+        if(p) {
+            delete p;
+        }
+
+    }
+
+    static void remove(void* p) {
+        remove(static_cast<MemoryContainer<T>*>(p));
+    }
 };
 
 };

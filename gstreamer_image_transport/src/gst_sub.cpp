@@ -144,7 +144,7 @@ void GStreamerSubscriber::_gst_thread_run() {
 
         //Clean our memory queue after each sample
         //Other functions will do this at the end as well outside of this loop
-        _clean_mem_queue();
+        // _clean_mem_queue();
             // if(common::get_pipeline_state(_gst_pipeline, 10ms) != GST_STATE_READY)
             //     RCLCPP_ERROR(_logger, "Stream is not ready!");
 
@@ -152,32 +152,6 @@ void GStreamerSubscriber::_gst_thread_run() {
     }
 
     RCLCPP_INFO(_logger, "Stream receiver stopped.");
-}
-
-size_t GStreamerSubscriber::_clean_mem_queue() {
-    //Do some cleanup
-    // auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
-    _mutex_mem.lock();
-    // const auto initial_size = _mem_queue.size();
-    //Skim through our packet memory buffer
-    //Idea is to drop all of the previous memory packets that are unused
-    //Seems like we have to stop once we have some queued memory that is still
-    //in use as something may be half-way through a hand-over
-    // std::erase_if(_mem_queue, common::MemoryMap<common::ConstSharedImageType>::is_last_reference);
-    while(!_mem_queue.empty()) {
-        if(_mem_queue.front().is_last_reference()) {
-            _mem_queue.pop_front();
-        } else {
-            break;
-        }
-    }
-
-    const auto end_size = _mem_queue.size();
-    _mutex_mem.unlock();
-
-    // RCLCPP_INFO_STREAM(_logger, "Mem: "  << end_size << "; Rem: " << (initial_size - end_size));
-
-    return end_size;
 }
 
 void GStreamerSubscriber::_gst_thread_stop() {
@@ -273,7 +247,6 @@ void GStreamerSubscriber::_gst_clean_up() {
     _has_shutdown = true;
 
     _gst_thread_stop();
-    _clean_mem_queue();
 
     tooling::gst_unref(_gst);
     // RCLCPP_INFO(_logger, "Deinit GST...");
@@ -334,58 +307,31 @@ void GStreamerSubscriber::_cb_packet(const common::TransportType::ConstSharedPtr
     _mutex_stamp.unlock();
 
     const size_t data_size = message->data.size()*sizeof(common::TransportType::_data_type::value_type);
-    auto mem = gst_memory_new_wrapped(
-        GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
+    auto mem = new common::MemoryContainer(message);
+    auto buffer = gst_buffer_new_wrapped_full(
+        GstMemoryFlags::GST_MEMORY_FLAG_READONLY,
         (gpointer)message->data.data(),
         data_size, 0, data_size,
-        nullptr, nullptr
+        (gpointer)mem, common::MemoryContainer<decltype(message)>::remove
     );
-    auto buffer = gst_buffer_new();
-    gst_buffer_append_memory(buffer, mem);
-    // const auto mem_ref = gst_memory_ref(mem);
-
-    //XXX: Memory by copy
-    // GstBuffer* buffer = gst_buffer_new_and_alloc(data_size);
-    // GstMapInfo map;
-    // if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
-    //     RCLCPP_ERROR(_logger, "Could allocate buffer");
-    //     gst_buffer_unref(buffer);
-    //     return;
-    // }
-    // const auto data = std::span(map.data, map.size);
-    // if(data.size() != data_size) {
-    //     RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
-    //     gst_buffer_unref(buffer);
-    //     return;
-    // }
-    // std::copy(message->data.begin(), message->data.end(), data.begin());
-    // gst_buffer_unmap (buffer, &map);
-
-    // const auto mem_stamp = common::ros_time_to_gst(message->header.stamp);
 
     const auto g_now = common::ros_time_to_gst(now);
     const auto g_stamp = common::ros_time_to_gst(message->header.stamp);
 
     gst_buffer_add_reference_timestamp_meta(buffer, _gst.time_ref, g_stamp, GST_CLOCK_TIME_NONE);
     gst_buffer_add_reference_timestamp_meta(buffer, _gst.pipeline_ref, g_now, GST_CLOCK_TIME_NONE);
-    // gst_buffer_add_reference_timestamp_meta(buffer, _gst.buffer_ref, mem_stamp, GST_CLOCK_TIME_NONE);
 
     const auto sample = gst_sample_new(buffer, caps, nullptr, nullptr);
 
     GstFlowReturn ret;
     g_signal_emit_by_name(_gst.source, "push-sample", sample, &ret);
-    gst_sample_unref(sample);
-    gst_caps_unref(caps);
 
-    if (ret == GST_FLOW_OK) {
-        //Add the timestamp of our packet memory to our list
-        _mutex_mem.lock();
-        _mem_queue.emplace_back(buffer, message);
-        _mutex_mem.unlock();
-    } else {
+    if (ret != GST_FLOW_OK) {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
 
+    gst_sample_unref(sample);
+    gst_caps_unref(caps);
     gst_buffer_unref(buffer);
 }
 

@@ -77,7 +77,6 @@ protected:
 
 private:
     void _gst_clean_up();
-    size_t _clean_mem_queue();
     void _gst_thread_start();
     void _gst_thread_run();
     void _gst_thread_stop();
@@ -105,9 +104,6 @@ private:
     mutable rclcpp::Time _last_stamp;
     mutable rclcpp::Time _last_key;
     mutable rclcpp::Duration _keyframe_interval;
-
-    mutable std::mutex _mutex_mem;
-    mutable std::deque<common::MemoryMap<common::ConstSharedImageType>> _mem_queue;
 
     double _dtf_min;
     double _dtf_max;

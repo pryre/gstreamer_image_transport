@@ -165,40 +165,11 @@ void GStreamerPublisher::_gst_thread_run() {
 
         //Clean our memory queue after each sample
         //Other functions will do this at the end as well outside of this loop
-        _clean_mem_queue();
             // if(common::get_pipeline_state(_gst_pipeline, 10ms) != GST_STATE_READY)
             //     RCLCPP_ERROR(_logger, "Stream is not ready!");
 
             // return;
     }
-}
-
-size_t GStreamerPublisher::_clean_mem_queue() {
-    //Do some cleanup
-    // auto buffer_ref = gst_buffer_get_reference_timestamp_meta(buffer, _gst.buffer_ref);
-    _mutex_mem.lock();
-    // RCLCPP_INFO_STREAM(_logger, "COUNT: " << (_mem_queue.size() ? GST_MINI_OBJECT_REFCOUNT_VALUE(_mem_queue.front().buf) : 0));
-
-    // const auto initial_size = _mem_queue.size();
-    //Skim through our packet memory buffer
-    //Idea is to drop all of the previous memory packets that are unused
-    //Seems like we have to stop once we have some queued memory that is still
-    //in use as something may be half-way through a hand-over
-    // std::erase_if(_mem_queue, common::MemoryMap<common::ConstSharedImageType>::is_last_reference);
-    while(!_mem_queue.empty()) {
-        if(_mem_queue.front().is_last_reference()) {
-            _mem_queue.pop_front();
-        } else {
-            break;
-        }
-    }
-
-    const auto end_size = _mem_queue.size();
-    _mutex_mem.unlock();
-
-    // RCLCPP_INFO_STREAM(_logger, "Mem: "  << end_size << "; Rem: " << (initial_size - end_size));
-
-    return end_size;
 }
 
 void GStreamerPublisher::_gst_thread_stop() {
@@ -266,7 +237,6 @@ void GStreamerPublisher::_gst_clean_up() {
     _has_shutdown = true;
 
     _gst_thread_stop();
-    _clean_mem_queue();
 
     tooling::gst_unref(_gst);
 
@@ -395,32 +365,14 @@ void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPt
     //XXX: At this point we should be confident that the stream is monotonic and we have a valid stamp
 
     const size_t data_size = message->data.size()*sizeof(sensor_msgs::msg::Image::_data_type::value_type);
-    //XXX: Non-copy insert
-    auto mem = gst_memory_new_wrapped(
-        GstMemoryFlags::GST_MEMORY_FLAG_READONLY, // | GstMemoryFlags::GST_MEMORY_FLAG_PHYSICALLY_CONTIGUOUS
+    // auto mem = common::MemoryContainer<decltype(message)>::create(message);
+    auto mem = new common::MemoryContainer(message);
+    auto buffer = gst_buffer_new_wrapped_full(
+        GstMemoryFlags::GST_MEMORY_FLAG_READONLY,
         (gpointer)message->data.data(),
         data_size, 0, data_size,
-        nullptr, nullptr
+        (gpointer)mem, common::MemoryContainer<decltype(message)>::remove
     );
-
-    GstBuffer* buffer = gst_buffer_new();
-    gst_buffer_append_memory(buffer, mem);
-
-    //XXX: Copy memory version
-    // GstMapInfo map;
-    // if(!gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
-    //     RCLCPP_ERROR(_logger, "Could allocate buffer");
-    //     gst_buffer_unref(buffer);
-    //     return;
-    // }
-    // const auto data = std::span(map.data, map.size);
-    // if(data.size() != data_size) {
-    //     RCLCPP_ERROR(_logger, "Buffer size was not allocated correctly");
-    //     gst_buffer_unref(buffer);
-    //     return;
-    // }
-    // std::copy(message->data.begin(), message->data.end(), data.begin());
-    // gst_buffer_unmap (buffer, &map);
 
     //XXX: Use the stream delta to calculate our buffer timings
     const auto g_stream_stamp = common::ros_time_to_gst(stream_delta);
@@ -443,12 +395,7 @@ void GStreamerPublisher::publishPtr(const sensor_msgs::msg::Image::ConstSharedPt
     gst_sample_unref(sample);
     gst_caps_unref(caps);
 
-    if (ret == GST_FLOW_OK) {
-        //Add the buffer and message to our memory list
-        _mutex_mem.lock();
-        _mem_queue.emplace_back(buffer, message);
-        _mutex_mem.unlock();
-    } else {
+    if (ret != GST_FLOW_OK) {
         RCLCPP_ERROR(_logger, "Could not push sample, frame dropped");
     }
 

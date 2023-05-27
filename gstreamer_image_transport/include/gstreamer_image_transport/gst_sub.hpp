@@ -48,7 +48,6 @@ private:
 
     void _cb_packet(const common::ConstSharedTransportType& message);
     bool _receive_sample(GstSample* sample);
-    size_t _clean_mem_queue();
 
 private:
     bool _has_shutdown;
@@ -70,9 +69,6 @@ private:
     tooling::gstreamer_context_data _gst;
 
     rclcpp::Time _last_stamp;
-    std::mutex _mutex_mem;
-    std::deque<common::MemoryMap<common::ConstSharedTransportType>> _mem_queue;
-
     mutable std::mutex _mutex_stamp;
 
     double _dtf_min;
