@@ -13,3 +13,8 @@ gst-launch-1.0 shmsrc socket-path=/tmp/camera_front is-live=true do-timestamp=tr
 gst-launch-1.0 udpsrc multicast-group=224.224.224.1 auto-multicast=true port=5000 ! application/x-rtp ! rtph264depay ! vaapih264dec low-latency=true ! autovideosink sync=false
 
 ros2 run gscam gscam_node --ros-args -p gscam_config:='shmsrc socket-path=/tmp/camera_front is-live=true do-timestamp=true ! video/x-raw,framerate=15/1,format=RGB,width=1280,height=800 ! videoconvert' -p sync_sink:=false
+
+
+
+gst-launch-1.0 v4l2src ! image/jpeg,width=1280,height=720,framerate=30/1 ! jpegdec ! videoconvert ! vaapih264enc quality-level=7 ! h264parse config-interval=-1 ! mpegtsmux ! udpsink host=127.0.0.1 port=5000
+gst-launch-1.0 udpsrc port=5000 ! tsdemux ! vaapih264dec low-latency=true ! autovideosink sync=false

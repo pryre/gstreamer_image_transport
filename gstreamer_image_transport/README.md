@@ -41,3 +41,9 @@ ros2 run image_tools showimage --ros-args -r image:=/out
 ros2 topic bw /camera/image_raw/gst
 ros2 topic delay /out
 ```
+
+Attempt 3:
+
+```sh
+ros2 run image_transport republish gst raw --ros-args -r in/gst:=camera/image_raw/gst -p gst_sub.pipeline:='h264parse ! vaapih264dec low-latency=true ! videoconvert ! video/x-raw,format=RGB'
+```

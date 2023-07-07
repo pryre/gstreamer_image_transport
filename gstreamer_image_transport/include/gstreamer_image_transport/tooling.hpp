@@ -211,6 +211,12 @@ inline bool gst_configure(const std::string pipeline_internal, gstreamer_context
         nullptr
     );
 
+    g_object_set(
+        G_OBJECT(context.sink),
+        "sync", false,
+        nullptr
+    );
+
     // const auto pads = GST_ELEMENT_PADS(GST_ELEMENT(context.source));
     // auto p = pads->next;
     // while(p) {
