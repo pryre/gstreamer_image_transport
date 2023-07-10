@@ -18,3 +18,9 @@ ros2 run gscam gscam_node --ros-args -p gscam_config:='shmsrc socket-path=/tmp/c
 
 gst-launch-1.0 v4l2src ! image/jpeg,width=1280,height=720,framerate=30/1 ! jpegdec ! videoconvert ! vaapih264enc quality-level=7 ! h264parse config-interval=-1 ! mpegtsmux ! udpsink host=127.0.0.1 port=5000
 gst-launch-1.0 udpsrc port=5000 ! tsdemux ! vaapih264dec low-latency=true ! autovideosink sync=false
+
+
+
+gst-launch-1.0 libcamerasrc ! video/x-raw,width=1920,height=1080,framerate=30/1,format=I420,interlace-mode=progressive ! v4l2h264enc ! video/x-h264,level=\(string\)4,profile=main ! h264parse config-interval=-1 ! mpegtsmux ! udpsink host=127.0.0.1 port=5000 sync=false
+gst-launch-1.0 libcamerasrc ! video/x-raw,width=1920,height=1080,framerate=30/1,format=I420,interlace-mode=progressive ! v4l2h264enc ! video/x-h264,level=\(string\)4,profile=main ! h264parse config-interval=-1 ! rtph264pay ! udpsink host=224.224.224.1 port=5000 auto-multicast=true sync=false
+gst-launch-1.0 udpsrc multicast-group=224.224.224.1 auto-multicast=true port=5000 ! application/x-rtp ! rtph264depay ! fakesink
