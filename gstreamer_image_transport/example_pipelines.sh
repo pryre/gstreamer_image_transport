@@ -24,3 +24,13 @@ gst-launch-1.0 udpsrc port=5000 ! tsdemux ! vaapih264dec low-latency=true ! auto
 gst-launch-1.0 libcamerasrc ! video/x-raw,width=1920,height=1080,framerate=30/1,format=I420,interlace-mode=progressive ! v4l2h264enc ! video/x-h264,level=\(string\)4,profile=main ! h264parse config-interval=-1 ! mpegtsmux ! udpsink host=127.0.0.1 port=5000 sync=false
 gst-launch-1.0 libcamerasrc ! video/x-raw,width=1920,height=1080,framerate=30/1,format=I420,interlace-mode=progressive ! v4l2h264enc ! video/x-h264,level=\(string\)4,profile=main ! h264parse config-interval=-1 ! rtph264pay ! udpsink host=224.224.224.1 port=5000 auto-multicast=true sync=false
 gst-launch-1.0 udpsrc multicast-group=224.224.224.1 auto-multicast=true port=5000 ! application/x-rtp ! rtph264depay ! fakesink
+
+
+#Normal Camera
+gst-launch-1.0 libcamerasrc ! video/x-raw,width=1920,height=1080,framerate=30/1,format=I420,interlace-mode=progressive ! v4l2h264enc extra-controls=encode,h264_minimum_qp_value=32,repeat_sequence_header=1 ! video/x-h264,level=\(string\)4,profile=main ! mpegtsmux ! udpsink host=224.224.224.1 port=5000 auto-multicast=true sync=false
+#HQ Camera
+gst-launch-1.0 libcamerasrc ! video/x-raw,colorimetry=bt709,interlace-mode=progressive,width=1280,height=720,framerate=30/1,format=NV12 ! v4l2h264enc extra-controls=encode,h264_minimum_qp_value=32,repeat_sequence_header=1 ! video/x-h264,level=\(string\)4,profile=main ! mpegtsmux ! udpsink host=224.224.224.1 port=5000 auto-multicast=true sync=false
+#Reciever
+gst-launch-1.0 udpsrc multicast-group=224.224.224.1 auto-multicast=true port=5000 !  video/mpegts ! tsdemux ! decodebin ! autovideosink sync=false
+#tsdemux0: CONTINUITY: Mismatch packet ###
+#^^^^^^^^ may be solved by adding a larger buffer to the reciever
